@@ -2,6 +2,8 @@
 
 Automated Borderlands 4 SHiFT code scraper and redeemer. This tool automatically scrapes SHiFT codes from gaming websites and redeems them on your behalf.
 
+**Docker Hub:** https://hub.docker.com/r/slipping/bl4-autoshift
+
 ## Code Sources
 
 This tool pulls codes from the following websites:
