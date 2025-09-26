@@ -1,0 +1,60 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.pytest_cache/
+.coverage
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+
+# Project runtime files
+bshift.db
+session.json
+last_notification.txt
+bshift_debug/
+*.log
+*.har
+playwright_state.json
+
+# Documentation and installers (not needed in container)
+docs/
+installers/
+LICENSE
+
+# Environment files (use docker.env.example in docker/ folder)
+.env
+.env.local
+.env.example
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/

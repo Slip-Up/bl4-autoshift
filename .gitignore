@@ -1,0 +1,53 @@
+# Environment files
+.env
+.env.local
+
+# Runtime files
+bshift.db
+session.json
+last_notification.txt
+*.log
+*.har
+
+# Debug directories
+bshift_debug/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+
+# Test files
+test_*.py
+debug_*.py
+playwright_state.json
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Local development files
+local_*
+dev_*
