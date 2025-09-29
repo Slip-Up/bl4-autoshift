@@ -59,17 +59,69 @@ class Config:
         self.max_retries = self._get_int("MAX_RETRIES", 8)
         self.no_redeem = self._get_bool("NO_REDEEM", False)
         
-        # Platform Configuration - Required
-        platforms_str = self._get_str("ALLOWED_PLATFORMS")
-        if not platforms_str:
-            raise ValueError("ALLOWED_PLATFORMS environment variable is required. Supported platforms: steam, epic, psn, xboxlive")
-        self.allowed_platforms = [p.strip() for p in platforms_str.split(",")]
+        # Service Configuration - Required (renamed from ALLOWED_PLATFORMS for clarity)
+        services_str = self._get_str("ALLOWED_SERVICES") or self._get_str("ALLOWED_PLATFORMS")  # Support both for backwards compatibility
+        if not services_str:
+            raise ValueError("ALLOWED_SERVICES environment variable is required. Supported services: steam, epic, psn, xboxlive, nintendo")
+        self.allowed_services = [s.strip() for s in services_str.split(",")]
         
-        # Validate platforms
-        valid_platforms = {"steam", "epic", "psn", "xboxlive", "nintendo"}
-        invalid_platforms = [p for p in self.allowed_platforms if p not in valid_platforms]
-        if invalid_platforms:
-            raise ValueError(f"Invalid platforms: {invalid_platforms}. Supported platforms: {', '.join(valid_platforms)}")
+        # Validate services
+        valid_services = {"steam", "epic", "psn", "xboxlive", "nintendo"}
+        invalid_services = [s for s in self.allowed_services if s not in valid_services]
+        if invalid_services:
+            raise ValueError(f"Invalid services: {invalid_services}. Supported services: {', '.join(valid_services)}")
+        
+        # Title Configuration - Required
+        titles_str = self._get_str("ALLOWED_TITLES")
+        if not titles_str:
+            raise ValueError("ALLOWED_TITLES environment variable is required. Supported titles: bl1, bl2, blps, bl3, ttw, bl4")
+        
+        # User-friendly abbreviations to internal code mapping
+        self.title_mapping = {
+            # User-friendly abbreviations
+            "bl1": "mopane",      # Borderlands: Game of the Year Edition
+            "bl2": "willow2",     # Borderlands 2
+            "blps": "cork",       # Borderlands: The Pre-Sequel
+            "bl3": "oak",         # Borderlands 3
+            "ttw": "daffodil",    # Tiny Tina's Wonderlands
+            "bl4": "oak2",        # Borderlands 4
+            # Also accept internal codes for backwards compatibility
+            "mopane": "mopane",
+            "willow2": "willow2", 
+            "cork": "cork",
+            "oak": "oak",
+            "daffodil": "daffodil",
+            "oak2": "oak2"
+        }
+        
+        # Convert user abbreviations to internal codes
+        user_titles = [t.strip().lower() for t in titles_str.split(",")]
+        self.allowed_titles = []
+        
+        for title in user_titles:
+            if title in self.title_mapping:
+                internal_code = self.title_mapping[title]
+                if internal_code not in self.allowed_titles:  # Avoid duplicates
+                    self.allowed_titles.append(internal_code)
+            else:
+                valid_abbrevs = [k for k in self.title_mapping.keys() if not k.startswith(('mopane', 'willow2', 'cork', 'oak', 'daffodil'))]
+                raise ValueError(f"Invalid title '{title}'. Supported abbreviations: {', '.join(valid_abbrevs)}")
+        
+        if not self.allowed_titles:
+            raise ValueError("No valid titles specified in ALLOWED_TITLES")
+        
+        # Create reverse mapping for display purposes
+        self.title_display_names = {
+            "mopane": "Borderlands 1",
+            "willow2": "Borderlands 2", 
+            "cork": "Borderlands: TPS",
+            "oak": "Borderlands 3",
+            "daffodil": "Tiny Tina's Wonderlands",
+            "oak2": "Borderlands 4"
+        }
+        
+        # Keep legacy allowed_platforms for backwards compatibility in other parts of code
+        self.allowed_platforms = self.allowed_services
         
         self.email = self._get_str("SHIFT_EMAIL")
         self.password = self._get_str("SHIFT_PASSWORD")
@@ -133,6 +185,8 @@ class RedemptionStatus(Enum):
     INVALID = "invalid"
     PLATFORM_UNAVAILABLE = "platform_unavailable"
     GAME_REQUIRED = "game_required"  # New status for "launch game first" message
+    TITLE_MISMATCH = "title_mismatch"  # New status for codes that don't match user's allowed titles
+    RATE_LIMITED = "rate_limited"  # New status for 429 Too Many Requests
     ERROR = "error"
     UNKNOWN = "unknown"
 
@@ -293,7 +347,9 @@ def log_config():
     log_info(f"Delay Between Requests: {Colors.BOLD}{config.delay_seconds}s{Colors.END}")
     log_info(f"Max Retries: {Colors.BOLD}{config.max_retries}{Colors.END}")
     log_info(f"Redeem Mode: {Colors.BOLD}{'Disabled' if config.no_redeem else 'Enabled'}{Colors.END}")
-    log_info(f"Target Platforms: {Colors.BOLD}{', '.join(config.allowed_platforms)}{Colors.END}")
+    log_info(f"Target Services: {Colors.BOLD}{', '.join(config.allowed_services)}{Colors.END}")
+    friendly_titles = [config.title_display_names.get(title, title) for title in config.allowed_titles]
+    log_info(f"Target Titles: {Colors.BOLD}{', '.join(friendly_titles)}{Colors.END}")
     
     if config.no_redeem:
         log_warning("Redemption is disabled - codes will only be scraped")
@@ -317,35 +373,240 @@ class DatabaseManager:
     def _init_database(self):
         """Initialize database schema"""
         with self.get_connection() as conn:
+            # Enable features and set pragmas
             conn.executescript("""
                 PRAGMA foreign_keys=ON;
                 PRAGMA journal_mode=WAL;
                 PRAGMA synchronous=NORMAL;
-                
-                CREATE TABLE IF NOT EXISTS codes (
-                    code TEXT PRIMARY KEY,
-                    source TEXT NOT NULL,
-                    first_seen_ts TEXT NOT NULL,
-                    expiration_date TEXT
-                );
-                
-                CREATE TABLE IF NOT EXISTS redemptions (
+            """)
+            
+            # Create or migrate schema
+            self._migrate_schema(conn)
+    
+    def _migrate_schema(self, conn):
+        """Handle database schema migration from older versions"""
+        # Check if this is a v0.1 database (no version table)
+        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='db_version'")
+        has_version_table = cursor.fetchone() is not None
+        
+        if not has_version_table:
+            # Check if v0.1 tables exist
+            cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='codes'")
+            has_codes_table = cursor.fetchone() is not None
+            
+            if has_codes_table:
+                log_info("Migrating database from v0.1 to current version...")
+                self._migrate_from_v01(conn)
+            else:
+                # Brand new database
+                self._create_fresh_schema(conn)
+        else:
+            # Check version and migrate if needed
+            cursor = conn.execute("SELECT version FROM db_version ORDER BY id DESC LIMIT 1")
+            row = cursor.fetchone()
+            current_version = row[0] if row else 1
+            
+            if current_version < 2:
+                self._migrate_to_v2(conn)
+    
+    def _migrate_from_v01(self, conn):
+        """Migrate from v0.1 schema to current schema"""
+        try:
+            # v0.1 had basic codes and redemptions tables
+            # Add the titles column to codes table (ignore error if exists)
+            try:
+                conn.execute("ALTER TABLE codes ADD COLUMN titles TEXT")
+            except:
+                pass  # Column might already exist
+            
+            # Add the new code_availability table
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS code_availability (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     code TEXT NOT NULL,
-                    platform TEXT NOT NULL,
-                    ts TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    detail TEXT,
-                    FOREIGN KEY(code) REFERENCES codes(code) ON DELETE CASCADE
-                );
-                
-                CREATE INDEX IF NOT EXISTS idx_redemptions_code_platform 
-                ON redemptions(code, platform);
-                
-                CREATE INDEX IF NOT EXISTS idx_codes_expiration 
-                ON codes(expiration_date);
+                    service TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    game_name TEXT,
+                    checked_ts TEXT NOT NULL,
+                    FOREIGN KEY(code) REFERENCES codes(code) ON DELETE CASCADE,
+                    UNIQUE(code, service, title)
+                )
             """)
+            
+            # Add the config_tracking table
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS config_tracking (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    allowed_services TEXT NOT NULL,
+                    allowed_titles TEXT NOT NULL,
+                    last_used_ts TEXT NOT NULL
+                )
+            """)
+            
+            # Add new indexes
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_code_availability_code ON code_availability(code)")
+            
+            # Create version table and mark as v2
+            conn.execute("CREATE TABLE db_version (id INTEGER PRIMARY KEY AUTOINCREMENT, version INTEGER, migrated_ts TEXT)")
+            conn.execute("INSERT INTO db_version (version, migrated_ts) VALUES (2, ?)", (datetime.now(timezone.utc).isoformat(),))
+            
+            conn.commit()
+            log_success("Database migrated from v0.1 to v2.0")
+        except Exception as e:
+            log_error(f"Migration from v0.1 failed: {e}")
+            raise
     
+    def _migrate_to_v2(self, conn):
+        """Migrate to version 2 (adds code_availability tracking)"""
+        try:
+            # Add titles column to codes table if it doesn't exist
+            try:
+                conn.execute("ALTER TABLE codes ADD COLUMN titles TEXT")
+            except:
+                pass  # Column might already exist
+            
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS code_availability (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    code TEXT NOT NULL,
+                    service TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    game_name TEXT,
+                    checked_ts TEXT NOT NULL,
+                    FOREIGN KEY(code) REFERENCES codes(code) ON DELETE CASCADE,
+                    UNIQUE(code, service, title)
+                )
+            """)
+            
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS config_tracking (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    allowed_services TEXT NOT NULL,
+                    allowed_titles TEXT NOT NULL,
+                    last_used_ts TEXT NOT NULL
+                )
+            """)
+            
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_code_availability_code ON code_availability(code)")
+            conn.execute("UPDATE db_version SET version = 2, migrated_ts = ? WHERE id = (SELECT MAX(id) FROM db_version)", (datetime.now(timezone.utc).isoformat(),))
+            
+            conn.commit()
+            log_success("Database migrated to v2.0")
+        except Exception as e:
+            log_error(f"Migration to v2 failed: {e}")
+            raise
+    
+    def _create_fresh_schema(self, conn):
+        """Create fresh database schema for new installations"""
+        conn.executescript("""
+            CREATE TABLE codes (
+                code TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                first_seen_ts TEXT NOT NULL,
+                expiration_date TEXT,
+                titles TEXT
+            );
+            
+            CREATE TABLE redemptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                ts TEXT NOT NULL,
+                status TEXT NOT NULL,
+                detail TEXT,
+                FOREIGN KEY(code) REFERENCES codes(code) ON DELETE CASCADE
+            );
+            
+            CREATE TABLE code_availability (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT NOT NULL,
+                service TEXT NOT NULL,
+                title TEXT NOT NULL,
+                game_name TEXT,
+                checked_ts TEXT NOT NULL,
+                FOREIGN KEY(code) REFERENCES codes(code) ON DELETE CASCADE,
+                UNIQUE(code, service, title)
+            );
+            
+            CREATE TABLE config_tracking (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                allowed_services TEXT NOT NULL,
+                allowed_titles TEXT NOT NULL,
+                last_used_ts TEXT NOT NULL
+            );
+            
+            CREATE TABLE db_version (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                version INTEGER,
+                migrated_ts TEXT
+            );
+            
+            CREATE INDEX idx_redemptions_code_platform ON redemptions(code, platform);
+            CREATE INDEX idx_code_availability_code ON code_availability(code);
+            CREATE INDEX idx_codes_expiration ON codes(expiration_date);
+        """)
+        
+        # Insert version record with parameter binding
+        conn.execute("INSERT INTO db_version (version, migrated_ts) VALUES (2, ?)", 
+                    (datetime.now(timezone.utc).isoformat(),))
+        
+        conn.commit()
+    
+    def check_and_update_configuration(self):
+        """Check if configuration changed and clear availability data if needed"""
+        current_services = ','.join(sorted(config.allowed_services))
+        current_titles = ','.join(sorted(config.allowed_titles))
+        
+        with self.get_connection() as conn:
+            # Check if config_tracking table exists first
+            cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='config_tracking'")
+            table_exists = cursor.fetchone() is not None
+            
+            if not table_exists:
+                # Create the missing table (migration issue)
+                conn.execute("""
+                    CREATE TABLE config_tracking (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        allowed_services TEXT NOT NULL,
+                        allowed_titles TEXT NOT NULL,
+                        last_used_ts TEXT NOT NULL
+                    )
+                """)
+                log_info("Created missing config_tracking table")
+            
+            # Get the most recent configuration
+            cursor = conn.execute("""
+                SELECT allowed_services, allowed_titles 
+                FROM config_tracking 
+                ORDER BY id DESC LIMIT 1
+            """)
+            row = cursor.fetchone()
+            
+            config_changed = False
+            if row:
+                last_services, last_titles = row
+                if last_services != current_services or last_titles != current_titles:
+                    config_changed = True
+                    log_info(f"Configuration changed from ({last_services}, {last_titles}) to ({current_services}, {current_titles}) - clearing availability data for efficiency")
+                    # Clear availability data since the configuration changed
+                    conn.execute("DELETE FROM code_availability")
+                else:
+                    if config.verbose:
+                        log_info(f"Configuration unchanged: {current_services}, {current_titles}")
+            else:
+                # First run, no previous config
+                config_changed = True
+                if config.verbose:
+                    log_info(f"First run - initializing configuration tracking: {current_services}, {current_titles}")
+            
+            # Update configuration tracking
+            if config_changed:
+                conn.execute("""
+                    INSERT INTO config_tracking (allowed_services, allowed_titles, last_used_ts)
+                    VALUES (?, ?, ?)
+                """, (current_services, current_titles, datetime.now(timezone.utc).isoformat()))
+                conn.commit()
+
     @contextmanager
     def get_connection(self):
         """Context manager for database connections"""
@@ -402,21 +663,89 @@ class DatabaseManager:
         return new_count
     
     def get_unredeemed_codes(self, platforms: List[str]) -> List[Tuple[str, Optional[datetime]]]:
-        """Get codes that need redemption with their expiration dates (includes game_required for retry)"""
+        """Get codes that need redemption - either unchecked or matching current user config"""
         placeholders = ','.join(['?' for _ in platforms])
+        
+        with self.get_connection() as conn:
+            # Get codes that don't have any final status (success, already_redeemed, expired, title_mismatch)
+            # Note: platform_unavailable is not included as it may be a temporary failure
+            cursor = conn.execute(f"""
+                SELECT DISTINCT c.code, c.expiration_date, c.titles
+                FROM codes c 
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM redemptions r 
+                    WHERE r.code = c.code 
+                    AND r.platform IN ({placeholders})
+                    AND r.status IN ('success', 'already_redeemed', 'expired', 'title_mismatch')
+                )
+                ORDER BY c.first_seen_ts DESC
+            """, platforms)
+            
+            results = []
+            # Convert internal codes back to user abbreviations for comparison
+            user_allowed_abbreviations = set()
+            for internal_code in config.allowed_titles:
+                # Find the abbreviation that maps to this internal code
+                for abbrev, mapped_internal in config.title_mapping.items():
+                    if mapped_internal == internal_code and len(abbrev) <= 4:  # Use short abbreviations only
+                        user_allowed_abbreviations.add(abbrev)
+                        break
+            
+            for row in cursor.fetchall():
+                code = row[0]
+                exp_str = row[1]
+                titles_csv = row[2]
+                
+                exp_date = datetime.fromisoformat(exp_str) if exp_str else None
+                
+                # Check if we should process this code
+                should_process = False
+                
+                if not titles_csv:
+                    # No titles stored yet - needs to be checked
+                    should_process = True
+                else:
+                    # Check if any of the code's titles match user's allowed titles
+                    code_titles = set(titles_csv.split(','))
+                    if code_titles & user_allowed_abbreviations:  # Intersection
+                        should_process = True
+                
+                if should_process:
+                    results.append((code, exp_date))
+            
+            # Removed verbose debug logging
+            
+            if len(results) > 0:
+                log_info(f"Filtered {len(results)} codes to process from database")
+            return results
+    
+    def get_codes_matching_current_config(self, platforms: List[str]) -> List[Tuple[str, Optional[datetime]]]:
+        """Get codes that we know work with current user configuration"""
+        placeholders = ','.join(['?' for _ in platforms])
+        
+        # Create parameters for current service/title combinations
+        service_title_params = []
+        for service in config.allowed_services:
+            for title in config.allowed_titles:
+                service_title_params.extend([service, title])
+        
+        service_title_placeholders = ','.join(['(?,?)' for _ in range(len(config.allowed_services) * len(config.allowed_titles))])
         
         with self.get_connection() as conn:
             cursor = conn.execute(f"""
                 SELECT DISTINCT c.code, c.expiration_date
                 FROM codes c 
-                WHERE NOT EXISTS (
+                INNER JOIN code_availability ca ON c.code = ca.code
+                WHERE (ca.service, ca.title) IN ({service_title_placeholders})
+                AND ca.game_name IS NOT NULL
+                AND NOT EXISTS (
                     SELECT 1 FROM redemptions r 
                     WHERE r.code = c.code 
                     AND r.platform IN ({placeholders})
                     AND r.status IN ('success', 'already_redeemed', 'expired')
                 )
                 ORDER BY c.first_seen_ts DESC
-            """, platforms)
+            """, service_title_params + platforms)
             
             results = []
             for row in cursor.fetchall():
@@ -506,6 +835,130 @@ class DatabaseManager:
                 (code, platform)
             )
             return cursor.fetchone() is not None
+    
+    def store_code_availability(self, code: str, combinations: List[Dict]) -> None:
+        """Store available service/title combinations for a code"""
+        with self.get_connection() as conn:
+            timestamp = datetime.now(timezone.utc).isoformat()
+            
+            # Clear existing availability data for this code
+            conn.execute("DELETE FROM code_availability WHERE code = ?", (code,))
+            
+            # Insert availability data for what the code actually works for
+            for combo in combinations:
+                conn.execute("""
+                    INSERT OR REPLACE INTO code_availability 
+                    (code, service, title, game_name, checked_ts) 
+                    VALUES (?, ?, ?, ?, ?)
+                """, (code, combo['service'], combo['title'], combo['game_name'], timestamp))
+            
+            # ALSO store that we checked this code against current user configuration
+            # This ensures we don't check the same code again for the same user config
+            for service in config.allowed_services:
+                for title in config.allowed_titles:
+                    conn.execute("""
+                        INSERT OR REPLACE INTO code_availability 
+                        (code, service, title, game_name, checked_ts) 
+                        VALUES (?, ?, ?, NULL, ?)
+                    """, (code, service, title, timestamp))
+            
+            conn.commit()
+    
+    def update_code_titles(self, code: str, combinations: List[Dict]) -> None:
+        """Update code's titles field with CSV of abbreviations it works for"""
+        # Create a comprehensive mapping from game names to abbreviations
+        game_name_mappings = {
+            # Borderlands 1 variants
+            "borderlands: game of the year edition": "bl1",
+            "borderlands goty": "bl1", 
+            "borderlands": "bl1",
+            
+            # Borderlands 2 variants
+            "borderlands 2": "bl2",
+            "bl2": "bl2",
+            
+            # Borderlands: The Pre-Sequel variants
+            "borderlands: the pre-sequel": "blps",
+            "borderlands pre-sequel": "blps",
+            "borderlands tps": "blps",
+            
+            # Borderlands 3 variants
+            "borderlands 3": "bl3",
+            "bl3": "bl3",
+            
+            # Tiny Tina's Wonderlands variants
+            "tiny tina's wonderlands": "ttw",
+            "wonderlands": "ttw",
+            "ttw": "ttw",
+            
+            # Borderlands 4 variants  
+            "borderlands 4": "bl4",
+            "bl4": "bl4"
+        }
+        
+        abbreviations = []
+        for combo in combinations:
+            game_name = combo.get('game_name', '').lower()
+            
+            # Try exact matches first
+            abbrev = game_name_mappings.get(game_name)
+            
+            # If no exact match, try partial matches
+            if not abbrev:
+                for game_pattern, abbr in game_name_mappings.items():
+                    if game_pattern in game_name or game_name in game_pattern:
+                        abbrev = abbr
+                        break
+            
+            if abbrev and abbrev not in abbreviations:
+                abbreviations.append(abbrev)
+        
+        # Store as CSV
+        titles_csv = ','.join(abbreviations) if abbreviations else ''
+        
+        with self.get_connection() as conn:
+            conn.execute("UPDATE codes SET titles = ? WHERE code = ?", (titles_csv, code))
+            conn.commit()
+    
+    def get_code_availability(self, code: str) -> List[Dict]:
+        """Get available service/title combinations for a code"""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT service, title, game_name FROM code_availability 
+                WHERE code = ?
+            """, (code,))
+            
+            return [
+                {'service': row[0], 'title': row[1], 'game_name': row[2]}
+                for row in cursor.fetchall()
+            ]
+    
+    def get_codes_needing_redemption_for_new_config(self) -> List[str]:
+        """Get codes that have availability for current config but haven't been redeemed yet"""
+        with self.get_connection() as conn:
+            # Build query to find codes that:
+            # 1. Have availability data for current allowed services/titles
+            # 2. Haven't been successfully redeemed for those service/title combinations
+            
+            service_placeholders = ','.join(['?' for _ in config.allowed_services])
+            title_placeholders = ','.join(['?' for _ in config.allowed_titles])
+            
+            cursor = conn.execute(f"""
+                SELECT DISTINCT ca.code
+                FROM code_availability ca
+                LEFT JOIN codes c ON ca.code = c.code
+                WHERE ca.service IN ({service_placeholders})
+                AND ca.title IN ({title_placeholders})
+                AND (c.expiration_date IS NULL OR c.expiration_date > datetime('now'))
+                AND NOT EXISTS (
+                    SELECT 1 FROM redemptions r 
+                    WHERE r.code = ca.code 
+                    AND r.platform = ca.service 
+                    AND r.status IN ('success', 'already_redeemed')
+                )
+            """, config.allowed_services + config.allowed_titles)
+            
+            return [row[0] for row in cursor.fetchall()]
 
 # Global database manager
 db = DatabaseManager()
@@ -735,6 +1188,7 @@ class CodeScraper:
         # Scraping sources
         self.sources = [
             ("https://mentalmars.com/game-news/borderlands-4-shift-codes/", "mentalmars"),
+            ("https://mentalmars.com/game-news/borderlands-golden-keys/", "mentalmars-golden"),
             ("https://gaming.news/codex/borderlands-4-shift-codes-list-guide-and-troubleshooting/", "gaming"),
             ("https://thegamepost.com/borderlands-4-all-shift-codes/", "thegamepost"),
             ("https://www.polygon.com/borderlands-4-active-shift-codes-redeem/", "polygon"),
@@ -759,10 +1213,7 @@ class CodeScraper:
                 try:
                     codes = future.result()
                     all_results[source_name] = codes
-                    
-                    if codes:
-                        log_success(f"{len(codes)} codes from {source_name}")
-                    # Don't log when no codes found - reduces noise
+                    # Logging moved to _process_new_codes() to show only new codes
                         
                 except Exception as e:
                     log(f"Error scraping {source_name}: {e}")
@@ -1172,7 +1623,7 @@ class CodeRedeemer:
         all_results = []
         game_required_encountered = False
         
-        # Process each code for each platform
+        # Process each code for all allowed service/title combinations
         for code, exp_date in codes_with_dates:
             if game_required_encountered:
                 # Mark remaining codes as game_required without attempting redemption
@@ -1190,21 +1641,30 @@ class CodeRedeemer:
                         db.add_redemption(result)
                 continue
             
-            for platform in config.allowed_platforms:
-                if db.is_code_redeemed(code, platform):
-                    continue
-                
-                log_info(f"Attempting {Colors.BOLD}{code}{Colors.END} for {Colors.BOLD}{platform}{Colors.END}")
-                result = self._redeem_single_code(code, platform)
-                all_results.append(result)
-                
+            # Check if code is already fully redeemed (all platforms)
+            already_redeemed_count = sum(1 for platform in config.allowed_platforms if db.is_code_redeemed(code, platform))
+            if already_redeemed_count == len(config.allowed_platforms):
+                continue
+            
+            log_info(f"Attempting {Colors.BOLD}{code}{Colors.END} for allowed service/title combinations")
+            results = self._redeem_code_combinations(code)
+            all_results.extend(results)
+            
+            # Log results and check for game required status
+            for result in results:
                 # Log result with appropriate colors
                 if result.status == RedemptionStatus.SUCCESS:
-                    log_code(code, "SUCCESS", f"redeemed for {platform}", Colors.GREEN)
+                    log_code(code, "SUCCESS", f"redeemed for {result.platform} - {result.message}", Colors.GREEN)
                 elif result.status == RedemptionStatus.ALREADY_REDEEMED:
-                    log_code(code, "SKIP", f"already redeemed for {platform}", Colors.YELLOW)
+                    log_code(code, "SKIP", f"already redeemed for {result.platform}", Colors.YELLOW)
                 elif result.status == RedemptionStatus.EXPIRED:
                     log_code(code, "EXPIRED", "code has expired", Colors.RED)
+                elif result.status == RedemptionStatus.RATE_LIMITED:
+                    log_code(code, "RATE LIMITED", "too many requests - waiting and retrying", Colors.YELLOW)
+                elif result.status == RedemptionStatus.PLATFORM_UNAVAILABLE:
+                    log_code(code, "INFO", f"{result.message}", Colors.BLUE)
+                elif result.status == RedemptionStatus.TITLE_MISMATCH:
+                    log_code(code, "INFO", f"{result.message}", Colors.BLUE)
                 elif result.status == RedemptionStatus.GAME_REQUIRED:
                     log_code(code, "GAME REQUIRED", "launch SHiFT-enabled game first", Colors.YELLOW)
                     game_required_encountered = True
@@ -1215,10 +1675,10 @@ class CodeRedeemer:
                 
                 # Add to database
                 db.add_redemption(result)
-                
-                # Break out of platform loop if game is required
-                if game_required_encountered:
-                    break
+            
+            # Break out of code loop if game is required
+            if game_required_encountered:
+                break
         
         success_count = sum(1 for r in all_results if r.status == RedemptionStatus.SUCCESS)
         
@@ -1323,63 +1783,156 @@ class CodeRedeemer:
             send_discord_notification(message)
             log_success(f"Sent redemption resolution notification for {len(successful_codes)} codes")
     
-    def _redeem_single_code(self, code: str, platform: str) -> RedemptionResult:
-        """Redeem a single code for a platform"""
+    def _redeem_code_combinations(self, code: str) -> List[RedemptionResult]:
+        """Redeem a code for all allowed service/title combinations"""
         timestamp = datetime.now(timezone.utc)
+        results = []
         
         try:
-            # Precheck the code
-            precheck_result = self._precheck_code(code, platform)
+            # Precheck the code to get all available combinations
+            precheck_result = self._precheck_code(code)
             
             if "error" in precheck_result:
                 error_msg = precheck_result["error"]
                 status = self._classify_error(error_msg)
-                return RedemptionResult(code, platform, status, error_msg, timestamp)
+                # Return error for all allowed platforms for consistency
+                for platform in config.allowed_platforms:
+                    results.append(RedemptionResult(code, platform, status, error_msg, timestamp))
+                return results
             
-            form_data = precheck_result["form_data"]
-            title = precheck_result.get("title", "Unknown")
+            # Store availability data for this code
+            available_combinations = precheck_result["combinations"]
+            if available_combinations:
+                db.store_code_availability(code, available_combinations)
+                db.update_code_titles(code, available_combinations)
+                log_info(f"Stored availability data for code {code}: {len(available_combinations)} combinations")
             
-            # Submit redemption
-            result = self._submit_redemption(form_data)
-            status, message = self._parse_redemption_response(result)
+            # Filter combinations by user's allowed services and titles
+            valid_combinations = []
             
-            return RedemptionResult(code, platform, status, message, timestamp)
+            for combo in available_combinations:
+                service = combo['service']
+                title = combo['title']
+                
+                if service in config.allowed_services and title in config.allowed_titles:
+                    valid_combinations.append(combo)
+            
+            if not valid_combinations:
+                # Show which titles this code IS valid for
+                available_titles = []
+                seen_titles = set()  # Track unique titles to avoid duplicates
+                
+                for combo in available_combinations:
+                    title_code = combo['title']
+                    game_name = combo['game_name']
+                    
+                    # Skip if we've already processed this title
+                    if title_code in seen_titles:
+                        continue
+                    seen_titles.add(title_code)
+                    
+                    # Get user-friendly abbreviation for this title
+                    user_abbrev = None
+                    for abbrev, internal in config.title_mapping.items():
+                        if internal == title_code and not abbrev.startswith(('mopane', 'willow2', 'cork', 'oak', 'daffodil')):
+                            user_abbrev = abbrev
+                            break
+                    available_titles.append({'title': title_code, 'game_name': game_name, 'abbrev': user_abbrev})
+                
+                if available_titles:
+                    # Show only abbreviations for concise output
+                    abbrev_list = []
+                    for title_info in available_titles:
+                        if title_info['abbrev']:
+                            abbrev_list.append(title_info['abbrev'])
+                        else:
+                            # Fallback to game name if no abbreviation found
+                            abbrev_list.append(title_info['game_name'])
+                    error_msg = f"Code valid for: {', '.join(abbrev_list)}"
+                else:
+                    error_msg = f"Code not valid for any service/title combinations"
+                
+                for platform in config.allowed_platforms:
+                    results.append(RedemptionResult(code, platform, RedemptionStatus.TITLE_MISMATCH, error_msg, timestamp))
+                return results
+            
+            # Redeem for each valid combination
+            for combo in valid_combinations:
+                service = combo['service']
+                title = combo['title']
+                game_name = combo['game_name']
+                form_data = combo['form_data']
+                
+                try:
+                    # Submit redemption
+                    result = self._submit_redemption(form_data)
+                    status, message = self._parse_redemption_response(result)
+                    
+                    # Add game name to message for clarity
+                    message_with_game = f"{message} ({game_name})"
+                    results.append(RedemptionResult(code, service, status, message_with_game, timestamp))
+                    
+                except Exception as e:
+                    error_msg = f"Redemption exception for {game_name}: {e}"
+                    results.append(RedemptionResult(code, service, RedemptionStatus.ERROR, error_msg, timestamp))
+            
+            return results
             
         except Exception as e:
-            error_msg = f"Redemption exception: {e}"
-            return RedemptionResult(code, platform, RedemptionStatus.ERROR, error_msg, timestamp)
+            error_msg = f"Code redemption exception: {e}"
+            for platform in config.allowed_platforms:
+                results.append(RedemptionResult(code, platform, RedemptionStatus.ERROR, error_msg, timestamp))
+            return results
     
-    def _precheck_code(self, code: str, platform: str) -> Dict[str, Any]:
-        """Precheck a code to get redemption form"""
-        try:
-            precheck_url = f"{config.base_url}/entitlement_offer_codes?code={quote(code)}"
-            
-            csrf_token = self.session.get_csrf_token()
-            headers = {
-                "X-Requested-With": "XMLHttpRequest",
-                "X-CSRF-Token": csrf_token,
-                "Accept": "text/html, */*; q=0.01",
-                "Referer": f"{config.base_url}/rewards",
-                "Cache-Control": "no-cache",
-                "Pragma": "no-cache",
-            }
-            
-            resp = self.session.get(
-                precheck_url,
-                headers=headers,
-                timeout=(config.connection_timeout, config.read_timeout)
-            )
-            
-            if resp.status_code != 200:
-                return {"error": f"Precheck failed with status {resp.status_code}"}
-            
-            return self._parse_precheck_response(resp.text, platform)
-            
-        except Exception as e:
-            return {"error": f"Precheck exception: {e}"}
+    def _precheck_code(self, code: str) -> Dict[str, Any]:
+        """Precheck a code to get all available redemption combinations with 429 retry logic"""
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count <= max_retries:
+            try:
+                precheck_url = f"{config.base_url}/entitlement_offer_codes?code={quote(code)}"
+                
+                csrf_token = self.session.get_csrf_token()
+                headers = {
+                    "X-Requested-With": "XMLHttpRequest",
+                    "X-CSRF-Token": csrf_token,
+                    "Accept": "text/html, */*; q=0.01",
+                    "Referer": f"{config.base_url}/rewards",
+                    "Cache-Control": "no-cache",
+                    "Pragma": "no-cache",
+                }
+                
+                resp = self.session.get(
+                    precheck_url,
+                    headers=headers,
+                    timeout=(config.connection_timeout, config.read_timeout)
+                )
+                
+                if resp.status_code == 429:
+                    retry_count += 1
+                    if retry_count <= max_retries:
+                        log_warning(f"Rate limited (429) for code {code}, waiting 60 seconds before retry {retry_count}/{max_retries}")
+                        time.sleep(60)  # Wait 60 seconds before retry
+                        continue
+                    else:
+                        return {"error": "rate_limited", "status_code": 429}
+                elif resp.status_code != 200:
+                    return {"error": f"Precheck failed with status {resp.status_code}"}
+                
+                return self._parse_precheck_response(resp.text)
+                
+            except Exception as e:
+                if retry_count < max_retries:
+                    retry_count += 1
+                    log_warning(f"Precheck exception for code {code}, retry {retry_count}/{max_retries}: {e}")
+                    time.sleep(5)  # Short wait for general exceptions
+                    continue
+                else:
+                    return {"error": f"Precheck exception: {e}"}
     
-    def _parse_precheck_response(self, html: str, platform: str) -> Dict[str, Any]:
-        """Parse precheck response for form data"""
+    def _parse_precheck_response(self, html: str, platform: str = None) -> Dict[str, Any]:
+        """Parse precheck response for all available service/title combinations"""
         soup = BeautifulSoup(html, 'html.parser')
         
         # Check for flash messages first
@@ -1400,14 +1953,18 @@ class CodeRedeemer:
                 return {"error": "Already redeemed"}
             return {"error": "No redemption form found"}
         
-        # Find form for our platform
-        platform_mapping = {"steam": "steam", "xboxlive": "xboxlive", "epic": "epic", "psn": "psn", "nintendo": "nintendo"}
-        target_service = platform_mapping.get(platform, platform)
+        # Extract all available service/title combinations
+        available_combinations = []
         
         for form in forms:
             service_input = form.find('input', {'name': 'archway_code_redemption[service]'})
-            if service_input and service_input.get('value', '').lower() == target_service.lower():
-                # Extract all form data
+            title_input = form.find('input', {'name': 'archway_code_redemption[title]'})
+            
+            if service_input and title_input:
+                service = service_input.get('value', '')
+                title = title_input.get('value', '')
+                
+                # Extract all form data for this combination
                 form_data = {}
                 for input_tag in form.find_all('input'):
                     name = input_tag.get('name')
@@ -1415,22 +1972,23 @@ class CodeRedeemer:
                     if name:
                         form_data[name] = value
                 
-                # Get title
-                title_element = (form.find('input', {'name': 'archway_code_redemption[title]'}) or
-                               form.find_previous('h3') or form.find_previous('h2'))
-                title = (title_element.get('value') if hasattr(title_element, 'get') and title_element.get('value')
-                        else title_element.get_text().strip() if title_element else 'Unknown Title')
+                # Get game name from preceding header
+                game_name = 'Unknown Game'
+                header = form.find_previous(['h1', 'h2', 'h3', 'h4'])
+                if header:
+                    game_name = header.get_text().strip()
                 
-                return {"form_data": form_data, "title": title}
+                available_combinations.append({
+                    'service': service,
+                    'title': title,
+                    'game_name': game_name,
+                    'form_data': form_data
+                })
         
-        # Form found but not for our platform
-        available_services = []
-        for form in forms:
-            service_input = form.find('input', {'name': 'archway_code_redemption[service]'})
-            if service_input:
-                available_services.append(service_input.get('value', ''))
+        if not available_combinations:
+            return {"error": "No valid service/title combinations found"}
         
-        return {"error": f"Platform {platform} not available. Available: {available_services}"}
+        return {"combinations": available_combinations}
     
     def _extract_flash_message(self, html: str) -> Optional[str]:
         """Extract flash message from HTML"""
@@ -1457,26 +2015,38 @@ class CodeRedeemer:
         return None
     
     def _submit_redemption(self, form_data: Dict[str, str]) -> requests.Response:
-        """Submit redemption form"""
-        csrf_token = self.session.get_csrf_token()
-        if csrf_token:
-            form_data["authenticity_token"] = csrf_token
+        """Submit redemption form with 429 retry logic"""
+        max_retries = 2
+        retry_count = 0
         
-        headers = {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Origin': config.base_url,
-            'Referer': f"{config.base_url}/rewards",
-            'X-Requested-With': 'XMLHttpRequest',
-            'Accept': 'text/vnd.turbo-stream.html, text/html;q=0.9, */*;q=0.8',
-        }
-        
-        return self.session.post(
-            f"{config.base_url}/code_redemptions",
-            data=form_data,
-            headers=headers,
-            timeout=(config.connection_timeout, config.read_timeout),
-            allow_redirects=False
-        )
+        while retry_count <= max_retries:
+            csrf_token = self.session.get_csrf_token()
+            if csrf_token:
+                form_data["authenticity_token"] = csrf_token
+            
+            headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Origin': config.base_url,
+                'Referer': f"{config.base_url}/rewards",
+                'X-Requested-With': 'XMLHttpRequest',
+                'Accept': 'text/vnd.turbo-stream.html, text/html;q=0.9, */*;q=0.8',
+            }
+            
+            resp = self.session.post(
+                f"{config.base_url}/code_redemptions",
+                data=form_data,
+                headers=headers,
+                timeout=(config.connection_timeout, config.read_timeout),
+                allow_redirects=False
+            )
+            
+            if resp.status_code == 429 and retry_count < max_retries:
+                retry_count += 1
+                log_warning(f"Rate limited (429) during redemption, waiting 60 seconds before retry {retry_count}/{max_retries}")
+                time.sleep(60)
+                continue
+            
+            return resp
     
     def _parse_redemption_response(self, resp: requests.Response) -> Tuple[RedemptionStatus, str]:
         """Parse redemption response"""
@@ -1486,6 +2056,8 @@ class CodeRedeemer:
                 flash_msg = self._extract_flash_message(resp.text)
                 if flash_msg:
                     return self._classify_flash_message(flash_msg), flash_msg
+        elif resp.status_code == 429:
+            return RedemptionStatus.RATE_LIMITED, "Rate limited - too many requests"
         elif resp.status_code in [302, 303, 307, 308]:
             # Handle redirect
             location = resp.headers.get("Location", "")
@@ -1506,7 +2078,9 @@ class CodeRedeemer:
     def _classify_error(self, error_msg: str) -> RedemptionStatus:
         """Classify error message into status"""
         error_lower = error_msg.lower()
-        if "expired" in error_lower:
+        if "rate_limited" in error_lower:
+            return RedemptionStatus.RATE_LIMITED
+        elif "expired" in error_lower:
             return RedemptionStatus.EXPIRED
         elif "redeemed" in error_lower:
             return RedemptionStatus.ALREADY_REDEEMED
@@ -1558,10 +2132,20 @@ class ShiftCodeManager:
         # Process new codes
         new_count = self._process_new_codes()
         
-        # Handle redemption
+        # Get codes that haven't been redeemed yet
         unredeemed_codes = db.get_unredeemed_codes(config.allowed_platforms)
-        if new_count > 0 or unredeemed_codes:
-            self._redeem_pending_codes(unredeemed_codes)
+        
+        # Also check for codes we know work with current config
+        matching_codes = db.get_codes_matching_current_config(config.allowed_platforms)
+        
+        # Combine and deduplicate codes
+        all_codes_dict = {}
+        for code, exp_date in unredeemed_codes + matching_codes:
+            all_codes_dict[code] = exp_date
+        all_codes_to_redeem = [(code, exp_date) for code, exp_date in all_codes_dict.items()]
+        
+        if new_count > 0 or all_codes_to_redeem:
+            self._redeem_pending_codes(all_codes_to_redeem)
         else:
             log_info("No new codes found, no pending redemptions")
         
@@ -1571,6 +2155,9 @@ class ShiftCodeManager:
         """Scrape and process new codes"""        
         # Scrape all sources concurrently
         all_results = self.scraper.scrape_all_sources()
+        
+        # Create a mapping from source names to URLs for logging
+        source_url_map = {name: url for url, name in self.scraper.sources}
         
         # Process results
         all_new_codes = []
@@ -1602,7 +2189,8 @@ class ShiftCodeManager:
             
             # Summary for this source - only if there are new codes
             if source_new_codes:
-                log_success(f"{len(source_new_codes)} new codes from {source_name}")
+                source_url = source_url_map.get(source_name, source_name)
+                log_success(f"{len(source_new_codes)} new codes from {source_url}")
         
         # Batch add all new codes
         new_count = db.add_codes_batch(all_new_codes)
@@ -1659,7 +2247,8 @@ class ShiftCodeManager:
             return
         
         log_section("Code Redemption")
-        log_info(f"Redeeming {len(valid_codes)} codes on {', '.join(config.allowed_platforms)}")
+        friendly_titles = [config.title_display_names.get(title, title) for title in config.allowed_titles]
+        log_info(f"Redeeming {len(valid_codes)} codes on {', '.join(config.allowed_services)} for titles {', '.join(friendly_titles)}")
         
         # Redeem valid codes
         results = self.redeemer.redeem_codes_batch(valid_codes)

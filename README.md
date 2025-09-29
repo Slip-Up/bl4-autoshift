@@ -1,136 +1,160 @@
-# BL4 AutoSHiFT
+# AutoSHiFT
 
-Automated Borderlands 4 SHiFT code scraper and redeemer. This tool automatically scrapes SHiFT codes from gaming websites and redeems them on your behalf.
+Automated Borderlands SHiFT code scraper and redeemer. This tool automatically scrapes SHiFT codes from websites and redeems them to your account across multiple Borderlands games and platforms.
 
-**Docker Hub:** https://hub.docker.com/r/slipping/bl4-autoshift
+**Multi-Game Support**: Works with all Borderlands games (BL1, BL2, BL:TPS, BL3, TTW, BL4)
 
 ## Code Sources
 
-This tool pulls codes from the following websites:
+The application scrapes SHiFT codes from these gaming websites:
 - https://mentalmars.com/game-news/borderlands-4-shift-codes/
+- https://mentalmars.com/game-news/borderlands-golden-keys/
 - https://gaming.news/codex/borderlands-4-shift-codes-list-guide-and-troubleshooting/
 - https://thegamepost.com/borderlands-4-all-shift-codes/
 - https://www.polygon.com/borderlands-4-active-shift-codes-redeem/
 - https://www.ign.com/wikis/borderlands-4/Borderlands_4_SHiFT_Codes
 - https://www.gamespot.com/articles/borderlands-4-shift-codes-all-active-keys-and-how-to-redeem-them/1100-6533833/
 
-Codes are automatically redeemed at: https://shift.gearboxsoftware.com
+All codes are redeemed via the official SHiFT website: https://shift.gearboxsoftware.com
 
-By default, it runs every hour to check for new codes and redeem them.
+## Quick Start
 
-## Setup
-
-### Docker Compose
-
-Create a `docker-compose.yml` file:
+1. **Create docker-compose.yml:**
 
 ```yaml
 services:
-  bl4-autoshift:
+  autoshift:
     image: slipping/bl4-autoshift:latest
     container_name: bl4-autoshift
     restart: unless-stopped
     env_file: .env
     volumes:
-      - bl4_data:/app/data
-      - bl4_logs:/app/logs
+      - bl4-autoshift-data:/app/data
     user: "1000:1000"
 volumes:
-  bl4_data:
-    driver: local
-  bl4_logs:
-    driver: local
+  bl4-autoshift-data:
 ```
 
-### Environment File
-
-Create a `.env` file in the same directory as the `docker-compose.yml`:
+2. **Create .env file:**
 
 ```env
-# BL4 AutoSHiFT - Configuration
-
-# REQUIRED: Your SHiFT account
+# Your SHiFT account credentials (required)
 SHIFT_EMAIL=your_email@example.com
 SHIFT_PASSWORD=your_password
 
-# REQUIRED: Which platforms to redeem codes for (they must be linked on your shift account)
-ALLOWED_PLATFORMS=steam,epic,psn,xboxlive,nintendo
+# Platforms to redeem codes for (required - must be linked to your SHiFT account)
+ALLOWED_SERVICES=steam
 
-# OPTIONAL: How often to run (in seconds)
-SCHEDULE_INTERVAL=3600  # 3600 = 1 hour
+# Games to redeem codes for (required)
+ALLOWED_TITLES=bl4
 
-# OPTIONAL: Discord webhook for notifications
-DISCORD_WEBHOOK_URL=
-
-# OPTIONAL: Enable detailed logging
-VERBOSE=1
-
-# OPTIONAL: Your timezone
-TZ=UTC
+# Optional settings
+SCHEDULE_INTERVAL=3600      # Run every hour
+VERBOSE=1                   # Enable detailed logging
+DISCORD_WEBHOOK_URL=        # Discord notifications (optional, this is used for code lockouts, where the site required you to open a game before you can redeem a code)
+TZ=UTC                      # Container timezone
 ```
 
-### Start the Container
+3. **Start the container:**
 
 ```bash
 docker compose up -d
 ```
 
-## Environment Variables
+## Configuration
 
-- `SHIFT_EMAIL` - Your SHiFT account email (required)
-- `SHIFT_PASSWORD` - Your SHiFT account password (required)
-- `ALLOWED_PLATFORMS` - Comma-separated platforms: steam, epic, psn, xboxlive (required)
-  - These platforms must be linked to your SHiFT account at https://shift.gearboxsoftware.com/associations
-  - If you get "Platform not available" errors, the platform isn't linked to your account
-  - Supported platforms: steam, epic, psn, xboxlive, nintendo?
-- `SCHEDULE_INTERVAL` - How often to run in seconds (default: 3600 = 1 hour)
-- `DISCORD_WEBHOOK_URL` - Discord webhook URL to notify you if you need to open the game before a code can be redeemed (optional)
-- `VERBOSE` - Enable detailed logging: 1 or 0 (default: 1)
-- `TZ` - Container timezone (default: UTC)
+### Required Environment Variables
 
-## Platform Linking
+- **SHIFT_EMAIL** - Your SHiFT account email address
+- **SHIFT_PASSWORD** - Your SHiFT account password
+- **ALLOWED_SERVICES** - Comma-separated list of platforms to redeem codes for
+- **ALLOWED_TITLES** - Comma-separated list of Borderlands games to redeem codes for
 
-**Important:** Before running the scraper, make sure your gaming platforms are linked to your SHiFT account:
+### Supported Services/Platforms
+
+- `steam` - Steam (PC)
+- `epic` - Epic Games Store (PC)
+- `psn` - PlayStation Network (PS4/PS5)
+- `xboxlive` - Xbox Live (Xbox One/Series)
+- `nintendo` - Nintendo Switch (not tested)
+
+**Important**: These platforms must be linked to your SHiFT account at https://shift.gearboxsoftware.com/associations
+
+### Supported Games/Titles
+
+- `bl1` - Borderlands: Game of the Year Edition
+- `bl2` - Borderlands 2
+- `blps` - Borderlands: The Pre-Sequel
+- `bl3` - Borderlands 3
+- `ttw` - Tiny Tina's Wonderlands
+- `bl4` - Borderlands 4
+
+### Optional Environment Variables
+
+- **SCHEDULE_INTERVAL** - Seconds between runs (default: 3600 = 1 hour)
+- **VERBOSE** - Enable detailed logging: 1 or 0 (default: 1)
+- **DISCORD_WEBHOOK_URL** - Discord webhook for notifications when the shift site requires you to open a game before you can redeem another key.
+- **TZ** - Container timezone (default: UTC, i.e.: America/New_York)
+
+## Platform Linking Setup
+
+Before using this script, you must link your gaming platforms to your SHiFT account:
 
 1. Visit https://shift.gearboxsoftware.com/associations
-2. Log into your SHiFT account
-3. Link the platforms you want to redeem codes for (Steam, Epic, PSN, Xbox Live)
-4. Only include linked platforms in your `ALLOWED_PLATFORMS` environment variable
+2. Sign into your SHiFT account
+3. Link each platform you want to use (Steam, Epic, PSN, XboxLive, Nintendo)
+4. Configure `ALLOWED_SERVICES` to include only your linked platforms
 
-If you see an error like `Platform not available, it means that platform isn't linked to your SHiFT account.
-
-**Tested Platforms:**
-- Steam - Working
-- Epic Games Store - Working  
-- PlayStation Network (PSN) - Working
-- Xbox Live - Working
-- Nintendo - Untested
+If you see "Platform not available" errors, the platform isn't properly linked to your account.
 
 ## Game Launch Requirement
 
-Sometimes the SHiFT website requires you to launch a Borderlands game before allowing code redemption. When this happens, the scraper will detect it and pause further redemption attempts. 
+Gearbox sometimes requires launching a SHiFT-enabled game before allowing code redemption. When this occurs:
 
-If you configure a Discord webhook URL, you will receive notifications when this game launch requirement is triggered, allowing you to manually launch a game and resolve the block.
+1. The scraper detects the requirement and pauses redemption
+2. Discord notification is sent (if configured)
+3. Launch any Borderlands game and sign into SHiFT in-game
+4. The scraper automatically resumes on the next run
 
-## Commands
+### Multiple Game Configuration
 
-```bash
-# View logs
-docker logs bl4-autoshift
+To redeem codes for multiple games, in your .env:
 
-# Follow logs in real-time
-docker logs -f bl4-autoshift
-
-# Restart container
-docker compose restart
-
-# Stop container
-docker compose down
-
-# Update to latest version
-docker compose pull && docker compose up -d
+```env
+ALLOWED_TITLES=bl3,bl4,ttw
+ALLOWED_SERVICES=steam,epic
 ```
+
+## Database
+
+Uses SQLite to store:
+- Discovered SHiFT codes with expiration dates
+- Redemption history and results
+- Code availability per service/title combination
+- Configuration change tracking
+
+The database is stored in the Docker volume and persists between container updates.
+
+## Troubleshooting
+
+### Common Issues
+
+**"Platform not available" errors**
+- Ensure the platform is linked at https://shift.gearboxsoftware.com/associations
+- Check `ALLOWED_SERVICES` matches your linked platforms
+
+**"Code valid for: bl1" messages**
+- This is normal - codes are filtered by your `ALLOWED_TITLES` setting
+- Only codes matching your configured games will be redeemed
+
+**Rate limiting (429 errors)**
+- Built-in retry logic handles temporary rate limits
+- Consider increasing `SCHEDULE_INTERVAL` if persistent
+
+**Game launch required**
+- Launch any Borderlands game and sign into SHiFT
+- Use `--clear-game-required` command to reset blocks
 
 ## License
 
-MIT License
+MIT License - see LICENSE file for details.

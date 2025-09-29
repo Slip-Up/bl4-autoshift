@@ -1,15 +1,11 @@
 services:
   bl4-autoshift:
-    image: slipping/bl4-autoshift:latest
+    build: .
     container_name: bl4-autoshift
     restart: unless-stopped
     env_file: .env
     volumes:
-      - bl4_data:/app/data
-      - bl4_logs:/app/logs
+      - bl4-autoshift-data:/app/data
     user: "1000:1000"
 volumes:
-  bl4_data:
-    driver: local
-  bl4_logs:
-    driver: local
+  bl4-autoshift-data:
