@@ -1,0 +1,11 @@
+services:
+  bl4-autoshift:
+    build: .
+    container_name: bl4-autoshift
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - bl4-autoshift-data:/app/data
+    user: "1000:1000"
+volumes:
+  bl4-autoshift-data:
