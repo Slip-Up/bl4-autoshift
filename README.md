@@ -1,6 +1,8 @@
-# AutoSHiFT
+# BL4 AutoSHiFT
 
 Automated Borderlands SHiFT code scraper and redeemer. This tool automatically scrapes SHiFT codes from websites and redeems them to your account across multiple Borderlands games and platforms.
+
+**Docker Hub:** https://hub.docker.com/r/slipping/bl4-autoshift
 
 **Multi-Game Support**: Works with all Borderlands games (BL1, BL2, BL:TPS, BL3, TTW, BL4)
 
