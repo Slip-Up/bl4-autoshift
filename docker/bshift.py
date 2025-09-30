@@ -1620,6 +1620,9 @@ class CodeRedeemer:
         if not codes_with_dates:
             return []
         
+        # Start with a clean redemption page to avoid stale messages
+        self._refresh_redemption_page()
+        
         all_results = []
         game_required_encountered = False
         
@@ -1876,10 +1879,14 @@ class CodeRedeemer:
                     error_msg = f"Redemption exception for {game_name}: {e}"
                     results.append(RedemptionResult(code, service, RedemptionStatus.ERROR, error_msg, timestamp))
             
+            # Refresh the page to clear any stale alert messages before next code
+            self._refresh_redemption_page()
             return results
             
         except Exception as e:
             error_msg = f"Code redemption exception: {e}"
+            # Still refresh page even on error to clear stale messages
+            self._refresh_redemption_page()
             for platform in config.allowed_platforms:
                 results.append(RedemptionResult(code, platform, RedemptionStatus.ERROR, error_msg, timestamp))
             return results
@@ -1943,13 +1950,14 @@ class CodeRedeemer:
         # Look for redemption forms
         forms = soup.find_all('form', action='/code_redemptions')
         if not forms:
-            # Check for common error indicators
-            content_lower = html.lower()
+            # Check for common error indicators in main content areas
+            main_content = soup.find(['main', '.main-content', '.content', '#content']) or soup
+            content_lower = main_content.get_text().lower()
             if "not found" in content_lower or "invalid" in content_lower:
                 return {"error": "Code not found or invalid"}
             elif "expired" in content_lower:
                 return {"error": "Code expired"}
-            elif "redeemed" in content_lower:
+            elif "this shift code has already been redeemed" in content_lower:
                 return {"error": "Already redeemed"}
             return {"error": "No redemption form found"}
         
@@ -1994,25 +2002,49 @@ class CodeRedeemer:
         """Extract flash message from HTML"""
         soup = BeautifulSoup(html, 'html.parser')
         
-        flash_selectors = ['.flash', '.alert', '.notice', '.error', '.message', '[data-flash]', '#flash', '.flash-message']
+        # First, check for current redemption results (most reliable)
+        code_results = soup.find(id='code_results')
+        if code_results and code_results.get('style') != 'display:none;':
+            result_text = code_results.get_text().strip()
+            if result_text and result_text != "Please wait":
+                return result_text
         
-        for selector in flash_selectors:
+        # Then check for fresh flash messages (excluding stale alert notices)
+        fresh_flash_selectors = ['.flash', '.error', '.message', '[data-flash]', '#flash', '.flash-message']
+        
+        for selector in fresh_flash_selectors:
             flash_elem = soup.select_one(selector)
             if flash_elem:
                 text = flash_elem.get_text().strip()
                 if text:
                     return text
         
-        # Check for text patterns
-        text_content = soup.get_text().lower()
-        if "already redeemed" in text_content:
-            return "Already redeemed"
-        elif "expired" in text_content and "code" in text_content:
-            return "Code expired"
-        elif "invalid" in text_content and "code" in text_content:
-            return "Invalid code"
+        # As a last resort, check for patterns in main content (but be very specific)
+        main_content = soup.find(['main', '.main-content', '.content', '#content']) or soup
+        text_content = main_content.get_text().lower()
+        
+        # Only check for these patterns if we didn't find a code_results element
+        if not code_results:
+            if "this shift code has already been redeemed" in text_content:
+                return "Already redeemed"
+            elif "expired" in text_content and "code" in text_content:
+                return "Code expired"
+            elif "invalid" in text_content and "code" in text_content:
+                return "Invalid code"
         
         return None
+    
+    def _refresh_redemption_page(self) -> bool:
+        """Refresh the redemption page to clear stale messages and alerts"""
+        try:
+            response = self.session.get(
+                f"{config.base_url}/code_redemptions",
+                timeout=(config.connection_timeout, config.read_timeout)
+            )
+            return response.status_code == 200
+        except Exception as e:
+            log_error(f"Failed to refresh redemption page: {e}")
+            return False
     
     def _submit_redemption(self, form_data: Dict[str, str]) -> requests.Response:
         """Submit redemption form with 429 retry logic"""
