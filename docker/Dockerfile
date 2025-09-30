@@ -4,7 +4,7 @@ FROM python:3.12-alpine
 # Set metadata
 LABEL maintainer="BL4 AutoSHiFT"
 LABEL description="Lightweight Borderlands 4 SHiFT code scraper container"
-LABEL version="v0.2.3"
+LABEL version="v0.2.4"
 
 # Create non-root user for security
 RUN addgroup -g 1000 -S shiftuser && \

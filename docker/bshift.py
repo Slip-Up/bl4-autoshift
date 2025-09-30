@@ -28,6 +28,12 @@ from bs4 import BeautifulSoup
 from dotenv import dotenv_values
 
 # -------------------------------
+# Version and Constants
+# -------------------------------
+
+__version__ = "0.2.4"
+
+# -------------------------------
 # Configuration and Constants
 # -------------------------------
 
@@ -2509,6 +2515,9 @@ class ShiftCodeManager:
 def main():
     """Application entry point"""
     import sys
+    
+    # Print version at startup
+    print(f"BL4 AutoSHiFT v{__version__}")
     
     # Handle command line arguments
     if len(sys.argv) > 1:
