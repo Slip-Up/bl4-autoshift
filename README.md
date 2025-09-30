@@ -111,6 +111,15 @@ docker compose up -d
 - `ttw` - Tiny Tina's Wonderlands
 - `bl4` - Borderlands 4
 
+### Multiple Game Configuration
+
+To redeem codes for multiple games, in your .env:
+
+```env
+ALLOWED_TITLES=bl3,bl4,ttw
+ALLOWED_SERVICES=steam,epic
+```
+
 ### Optional Environment Variables
 
 - **SCHEDULE_INTERVAL** - Seconds between runs (default: 3600 = 1 hour)
@@ -137,15 +146,6 @@ Gearbox sometimes requires launching a SHiFT-enabled game before allowing code r
 2. Discord notification is sent (if configured)
 3. Launch any Borderlands game and sign into SHiFT in-game
 4. The scraper automatically resumes on the next run
-
-### Multiple Game Configuration
-
-To redeem codes for multiple games, in your .env:
-
-```env
-ALLOWED_TITLES=bl3,bl4,ttw
-ALLOWED_SERVICES=steam,epic
-```
 
 ## Database
 
@@ -175,7 +175,7 @@ The database is stored in the Docker volume and persists between container updat
 
 **Game launch required**
 - Launch any Borderlands game and sign into SHiFT
-- Use `--clear-game-required` command to reset blocks
+- This sometimes will clear up on it's own without you having to open a game, but if you have a lot of codes to redeem, expect to see this a lot as it works through them.
 
 ## License
 
