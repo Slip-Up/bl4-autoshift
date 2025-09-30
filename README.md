@@ -40,21 +40,41 @@ volumes:
 2. **Create .env file:**
 
 ```env
-# Your SHiFT account credentials (required)
+# BL4 AutoSHiFT - Configuration
+# Copy this file to .env and edit with your details
+
+# REQUIRED: Your SHiFT account
 SHIFT_EMAIL=your_email@example.com
 SHIFT_PASSWORD=your_password
 
-# Platforms to redeem codes for (required - must be linked to your SHiFT account)
+# REQUIRED: Which services/platforms to redeem codes for (they must be linked on your shift account)
+#steam - Steam (PC)
+#epic - Epic Games Store (PC)
+#psn - PlayStation Network (PS4/PS5)
+#xboxlive - Xbox Live (Xbox One/Series)
+#nintendo - Nintendo Switch (not tested)
 ALLOWED_SERVICES=steam
 
-# Games to redeem codes for (required)
+# REQUIRED: Which game titles to redeem codes for
+# bl1 = Borderlands: Game of the Year Edition
+# bl2 = Borderlands 2
+# blps = Borderlands: The Pre-Sequel  
+# bl3 = Borderlands 3
+# ttw = Tiny Tina's Wonderlands
+# bl4 = Borderlands 4
 ALLOWED_TITLES=bl4
 
-# Optional settings
-SCHEDULE_INTERVAL=3600      # Run every hour
-VERBOSE=1                   # Enable detailed logging
-DISCORD_WEBHOOK_URL=        # Discord notifications (optional, this is used for code lockouts, where the site required you to open a game before you can redeem a code)
-TZ=UTC                      # Container timezone
+# OPTIONAL: How often to run (in seconds)
+SCHEDULE_INTERVAL=3600  # 3600 = 1 hour
+
+# OPTIONAL: Discord webhook for notifications on shift site lockout, where it requires you to open a game before a code can be redeemed
+DISCORD_WEBHOOK_URL=
+
+# OPTIONAL: Enable detailed logging
+VERBOSE=1
+
+# OPTIONAL: Your timezone (use TZ identifier from https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)
+TZ=UTC
 ```
 
 3. **Start the container:**
