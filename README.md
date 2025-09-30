@@ -40,21 +40,41 @@ volumes:
 2. **Create .env file:**
 
 ```env
-# Your SHiFT account credentials (required)
+# BL4 AutoSHiFT - Configuration
+# Copy this file to .env and edit with your details
+
+# REQUIRED: Your SHiFT account
 SHIFT_EMAIL=your_email@example.com
 SHIFT_PASSWORD=your_password
 
-# Platforms to redeem codes for (required - must be linked to your SHiFT account)
+# REQUIRED: Which services/platforms to redeem codes for (they must be linked on your shift account)
+#steam - Steam (PC)
+#epic - Epic Games Store (PC)
+#psn - PlayStation Network (PS4/PS5)
+#xboxlive - Xbox Live (Xbox One/Series)
+#nintendo - Nintendo Switch (not tested)
 ALLOWED_SERVICES=steam
 
-# Games to redeem codes for (required)
+# REQUIRED: Which game titles to redeem codes for
+# bl1 = Borderlands: Game of the Year Edition
+# bl2 = Borderlands 2
+# blps = Borderlands: The Pre-Sequel  
+# bl3 = Borderlands 3
+# ttw = Tiny Tina's Wonderlands
+# bl4 = Borderlands 4
 ALLOWED_TITLES=bl4
 
-# Optional settings
-SCHEDULE_INTERVAL=3600      # Run every hour
-VERBOSE=1                   # Enable detailed logging
-DISCORD_WEBHOOK_URL=        # Discord notifications (optional, this is used for code lockouts, where the site required you to open a game before you can redeem a code)
-TZ=UTC                      # Container timezone
+# OPTIONAL: How often to run (in seconds)
+SCHEDULE_INTERVAL=3600  # 3600 = 1 hour
+
+# OPTIONAL: Discord webhook for notifications on shift site lockout, where it requires you to open a game before a code can be redeemed
+DISCORD_WEBHOOK_URL=
+
+# OPTIONAL: Enable detailed logging
+VERBOSE=1
+
+# OPTIONAL: Your timezone (use TZ identifier from https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)
+TZ=UTC
 ```
 
 3. **Start the container:**
@@ -91,6 +111,15 @@ docker compose up -d
 - `ttw` - Tiny Tina's Wonderlands
 - `bl4` - Borderlands 4
 
+### Multiple Game Configuration
+
+To redeem codes for multiple games, in your .env:
+
+```env
+ALLOWED_TITLES=bl3,bl4,ttw
+ALLOWED_SERVICES=steam,epic
+```
+
 ### Optional Environment Variables
 
 - **SCHEDULE_INTERVAL** - Seconds between runs (default: 3600 = 1 hour)
@@ -117,15 +146,6 @@ Gearbox sometimes requires launching a SHiFT-enabled game before allowing code r
 2. Discord notification is sent (if configured)
 3. Launch any Borderlands game and sign into SHiFT in-game
 4. The scraper automatically resumes on the next run
-
-### Multiple Game Configuration
-
-To redeem codes for multiple games, in your .env:
-
-```env
-ALLOWED_TITLES=bl3,bl4,ttw
-ALLOWED_SERVICES=steam,epic
-```
 
 ## Database
 
@@ -155,7 +175,7 @@ The database is stored in the Docker volume and persists between container updat
 
 **Game launch required**
 - Launch any Borderlands game and sign into SHiFT
-- Use `--clear-game-required` command to reset blocks
+- This sometimes will clear up on it's own without you having to open a game, but if you have a lot of codes to redeem, expect to see this a lot as it works through them.
 
 ## License
 
