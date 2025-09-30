@@ -1,6 +1,6 @@
 services:
   bl4-autoshift:
-    build: .
+    image: slipping/bl4-autoshift:latest
     container_name: bl4-autoshift
     restart: unless-stopped
     env_file: .env
