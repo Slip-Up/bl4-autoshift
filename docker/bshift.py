@@ -1806,17 +1806,31 @@ class CodeRedeemer:
                 error_msg = precheck_result["error"]
                 status = self._classify_error(error_msg)
                 
-                # If we got rate limited, back off for 60 seconds before continuing
+                # If we got rate limited, back off for 60 seconds then retry the same code
                 if status == RedemptionStatus.RATE_LIMITED:
-                    log_warning(f"Rate limited for code {code}, backing off for 60 seconds before continuing")
+                    log_warning(f"Rate limited for code {code}, backing off for 60 seconds then retrying same code")
                     time.sleep(60)
                     # Refresh the page to clear any stale state
                     self._refresh_redemption_page()
-                
-                # Return error for all allowed platforms for consistency
-                for platform in config.allowed_platforms:
-                    results.append(RedemptionResult(code, platform, status, error_msg, timestamp))
-                return results
+                    
+                    # Retry the same code once after backoff
+                    log_warning(f"Retrying precheck for {code} after rate limit backoff")
+                    retry_precheck_result = self._precheck_code(code)
+                    
+                    if "error" not in retry_precheck_result:
+                        # Success on retry, continue with normal redemption flow
+                        precheck_result = retry_precheck_result
+                    else:
+                        # Still failed on retry, return rate limited status
+                        log_warning(f"Precheck still failed for {code} after retry")
+                        for platform in config.allowed_platforms:
+                            results.append(RedemptionResult(code, platform, status, error_msg, timestamp))
+                        return results
+                else:
+                    # Non rate-limit error, return immediately
+                    for platform in config.allowed_platforms:
+                        results.append(RedemptionResult(code, platform, status, error_msg, timestamp))
+                    return results
             
             # Store availability data for this code
             available_combinations = precheck_result["combinations"]
