@@ -55,7 +55,7 @@ class Config:
         # Runtime Configuration
         self.verbose = self._get_bool("VERBOSE", False)
         self.debug = self._get_bool("DEBUG", False)
-        self.delay_seconds = self._get_float("DELAY_SECONDS", 2.0)
+        self.delay_seconds = self._get_float("DELAY_SECONDS", 5.0)
         self.max_retries = self._get_int("MAX_RETRIES", 8)
         self.no_redeem = self._get_bool("NO_REDEEM", False)
         
@@ -1614,6 +1614,13 @@ class CodeRedeemer:
     
     def __init__(self, session: OptimizedSession):
         self.session = session
+        # Track suspicious invalid streaks that likely indicate rate limiting
+        self._suspect_invalid_streak = 0
+        self._last_suspect_ts = 0.0
+        # Track last time we observed a 429 to gate invalid classifications during throttle windows
+        self._last_429_ts = 0.0
+        # Track last time a precheck returned valid combinations (to bias against sudden invalid)
+        self._last_valid_precheck_ts = 0.0
     
     def redeem_codes_batch(self, codes_with_dates: List[Tuple[str, Optional[datetime]]]) -> List[RedemptionResult]:
         """Redeem multiple codes efficiently (codes are already pre-filtered for expiration)"""
@@ -1798,6 +1805,14 @@ class CodeRedeemer:
             if "error" in precheck_result:
                 error_msg = precheck_result["error"]
                 status = self._classify_error(error_msg)
+                
+                # If we got rate limited, back off for 60 seconds before continuing
+                if status == RedemptionStatus.RATE_LIMITED:
+                    log_warning(f"Rate limited for code {code}, backing off for 60 seconds before continuing")
+                    time.sleep(60)
+                    # Refresh the page to clear any stale state
+                    self._refresh_redemption_page()
+                
                 # Return error for all allowed platforms for consistency
                 for platform in config.allowed_platforms:
                     results.append(RedemptionResult(code, platform, status, error_msg, timestamp))
@@ -1870,6 +1885,34 @@ class CodeRedeemer:
                     # Submit redemption
                     result = self._submit_redemption(form_data)
                     status, message = self._parse_redemption_response(result)
+
+                    # If precheck proved this code has valid combinations, but redemption
+                    # reports invalid (or message contains the exact invalid phrase), treat as rate limit.
+                    if available_combinations and (
+                        status == RedemptionStatus.INVALID or 
+                        (message and 'not a valid shift code' in message.lower())
+                    ):
+                        now = time.time()
+                        # Count a suspicious invalid toward streak
+                        if now - self._last_suspect_ts > 120:
+                            # Reset streak if it has been a while
+                            self._suspect_invalid_streak = 0
+                        self._last_suspect_ts = now
+                        self._suspect_invalid_streak += 1
+
+                        log_warning(
+                            "Suspicious INVALID received after successful precheck; treating as rate limiting"
+                        )
+                        status = RedemptionStatus.RATE_LIMITED
+                        message = "Rate limited - treating temporary invalid as throttling"
+                        
+                        # Back off to avoid hammering the site
+                        backoff = 60
+                        log_warning(f"Backing off for {backoff}s due to suspected rate limiting")
+                        time.sleep(backoff)
+                        
+                        # Optionally refresh redemption page to clear any stale UI state
+                        self._refresh_redemption_page()
                     
                     # Add game name to message for clarity
                     message_with_game = f"{message} ({game_name})"
@@ -1895,6 +1938,7 @@ class CodeRedeemer:
         """Precheck a code to get all available redemption combinations with 429 retry logic"""
         max_retries = 3
         retry_count = 0
+        invalid_reconfirm_attempted = False
         
         while retry_count <= max_retries:
             try:
@@ -1916,18 +1960,57 @@ class CodeRedeemer:
                     timeout=(config.connection_timeout, config.read_timeout)
                 )
                 
+                # Handle status codes first before any parsing
                 if resp.status_code == 429:
+                    self._last_429_ts = time.time()
                     retry_count += 1
                     if retry_count <= max_retries:
                         log_warning(f"Rate limited (429) for code {code}, waiting 60 seconds before retry {retry_count}/{max_retries}")
                         time.sleep(60)  # Wait 60 seconds before retry
                         continue
                     else:
-                        return {"error": "rate_limited", "status_code": 429}
+                        log_error(f"Rate limited (429) for code {code} after {max_retries} retries")
+                        return {"error": "rate_limited"}
                 elif resp.status_code != 200:
                     return {"error": f"Precheck failed with status {resp.status_code}"}
                 
-                return self._parse_precheck_response(resp.text)
+                # Only parse response if status is 200
+                parsed = self._parse_precheck_response(resp.text)
+                # If we got combinations, record recent valid precheck time
+                if isinstance(parsed, dict) and parsed.get("combinations"):
+                    self._last_valid_precheck_ts = time.time()
+                    return parsed
+                
+                # If parsed as error, check for rate limiting first
+                if isinstance(parsed, dict) and "error" in parsed:
+                    err = parsed["error"].lower()
+                    
+                    # If we got a rate_limited error, back off for 60 seconds
+                    if err == "rate_limited":
+                        log_warning(f"Rate limited detected during precheck for {code}, backing off for 60 seconds")
+                        time.sleep(60)
+                        # Try once more after backoff
+                        if retry_count < max_retries:
+                            retry_count += 1
+                            continue
+                        else:
+                            return parsed
+                    
+                    # Handle suspicious invalid after recent valid activity
+                    recently_rate_limited = (time.time() - self._last_429_ts) < 180
+                    recently_had_valid = (time.time() - self._last_valid_precheck_ts) < 120
+                    looks_invalid = ("invalid" in err) or ("not a valid shift code" in err)
+                    if looks_invalid and (recently_rate_limited or recently_had_valid):
+                        if not invalid_reconfirm_attempted:
+                            invalid_reconfirm_attempted = True
+                            log_warning("Precheck returned invalid right after recent valid activity; waiting 30s and retrying to avoid throttle misclassification")
+                            time.sleep(30)
+                            continue
+                        else:
+                            log_warning("Confirming invalid after retry; still marking invalid")
+                    return parsed
+                
+                return parsed
                 
             except Exception as e:
                 if retry_count < max_retries:
@@ -1945,7 +2028,14 @@ class CodeRedeemer:
         # Check for flash messages first
         flash_msg = self._extract_flash_message(html)
         if flash_msg:
-            return {"error": flash_msg}
+            # If flash message looks like an invalid message, keep it.
+            # But if it doesn't match known invalid/redeemed/expired and no forms exist,
+            # prefer returning a rate-limited signal to trigger backoff.
+            fl = flash_msg.lower()
+            if any(k in fl for k in ["invalid", "redeemed", "expired", "not a valid shift code"]):
+                return {"error": flash_msg}
+            else:
+                return {"error": "rate_limited"}
         
         # Look for redemption forms
         forms = soup.find_all('form', action='/code_redemptions')
@@ -1953,12 +2043,30 @@ class CodeRedeemer:
             # Check for common error indicators in main content areas
             main_content = soup.find(['main', '.main-content', '.content', '#content']) or soup
             content_lower = main_content.get_text().lower()
-            if "not found" in content_lower or "invalid" in content_lower:
-                return {"error": "Code not found or invalid"}
-            elif "expired" in content_lower:
-                return {"error": "Code expired"}
-            elif "this shift code has already been redeemed" in content_lower:
+            full_content = main_content.get_text().strip()
+            
+            # Look for specific SHiFT error messages first
+            recently_rate_limited = (time.time() - self._last_429_ts) < 180
+            if "this shift code has already been redeemed" in content_lower and not recently_rate_limited:
                 return {"error": "Already redeemed"}
+            elif "this shift code has expired" in content_lower and not recently_rate_limited:
+                return {"error": "Code expired"}  
+            elif "this is not a valid shift code" in content_lower and not recently_rate_limited:
+                return {"error": "Invalid SHiFT code"}
+            elif "expired" in content_lower and "code" in content_lower:
+                if not recently_rate_limited:
+                    return {"error": "Code expired"}
+                else:
+                    return {"error": "rate_limited"}
+            elif "not found" in content_lower or "invalid" in content_lower:
+                if not recently_rate_limited:
+                    return {"error": "Code not found or invalid"}
+                else:
+                    return {"error": "rate_limited"}
+            elif len(full_content) < 20:
+                # Very sparse content often occurs during throttling issues
+                return {"error": "rate_limited"}
+            
             return {"error": "No redemption form found"}
         
         # Extract all available service/title combinations
@@ -2006,11 +2114,39 @@ class CodeRedeemer:
         code_results = soup.find(id='code_results')
         if code_results and code_results.get('style') != 'display:none;':
             result_text = code_results.get_text().strip()
-            if result_text and result_text != "Please wait":
-                return result_text
+            if result_text and result_text not in ["Please wait", ""]:
+                # Debug logging to see what we're getting
+                log_warning(f"DEBUG: code_results content: '{result_text}'")
+                
+                # Look for specific SHiFT error messages and return only those
+                result_text_lower = result_text.lower()
+                # First check for rate limiting indicators - "Unexpected error occurred" means 429
+                if 'unexpected error occurred' in result_text_lower:
+                    log_warning(f"DEBUG: Found 'Unexpected error occurred' in code_results - treating as rate limited")
+                    return "RATE_LIMITED"
+                elif 'rate limit' in result_text_lower or 'too many requests' in result_text_lower or 'slow down' in result_text_lower or 'temporarily unavailable' in result_text_lower:
+                    return "RATE_LIMITED"
+                elif 'this is not a valid shift code' in result_text_lower:
+                    log_warning(f"DEBUG: Returning 'This is not a valid SHiFT code' from code_results")
+                    return "This is not a valid SHiFT code"
+                elif 'this shift code has expired' in result_text_lower:
+                    return "This SHiFT code has expired"
+                elif 'this shift code has already been redeemed' in result_text_lower:
+                    return "This SHiFT code has already been redeemed"
+                elif 'invalid shift code' in result_text_lower:
+                    return "Invalid SHiFT code"
+                elif 'code not found' in result_text_lower:
+                    return "Code not found"
+                elif 'already redeemed' in result_text_lower:
+                    return "Already redeemed"
+                elif 'expired' in result_text_lower:
+                    return "Code expired"
+                
+                # If no specific error pattern found, return None to try other methods
+                return None
         
         # Then check for fresh flash messages (excluding stale alert notices)
-        fresh_flash_selectors = ['.flash', '.error', '.message', '[data-flash]', '#flash', '.flash-message']
+        fresh_flash_selectors = ['.flash', '.error', '.message', '[data-flash]', '#flash', '.flash-message', '.alert-danger', '.error-message']
         
         for selector in fresh_flash_selectors:
             flash_elem = soup.select_one(selector)
@@ -2018,6 +2154,31 @@ class CodeRedeemer:
                 text = flash_elem.get_text().strip()
                 if text:
                     return text
+        
+        # Also check for any visible error containers that might contain the message
+        # But ignore hidden elements (display:none) as they contain misleading cached text
+        error_containers = soup.select('#shift_code_instructions, #shift_code_error, .sh_status_container_code_redemption')
+        for container in error_containers:
+            # Skip hidden elements completely - they contain stale/misleading text
+            if container and container.get('style') and 'display:none' in container.get('style', ''):
+                continue
+            if container and container.get('style') != 'display:none;':
+                text = container.get_text().strip()
+                if text and text != "Please wait":
+                    # Check for rate limiting first
+                    text_lower = text.lower()
+                    if 'unexpected error occurred' in text_lower:
+                        log_warning(f"DEBUG: Found 'Unexpected error occurred' in container - treating as rate limited")
+                        return "RATE_LIMITED"
+                    # Only return known error patterns to avoid concatenation
+                    elif 'this is not a valid shift code' in text_lower:
+                        return "This is not a valid SHiFT code"
+                    elif 'already been redeemed' in text_lower:
+                        return "Already redeemed"
+                    elif 'expired' in text_lower:
+                        return "Code expired"
+                    elif 'invalid' in text_lower and 'code' in text_lower:
+                        return "Invalid code"
         
         # As a last resort, check for patterns in main content (but be very specific)
         main_content = soup.find(['main', '.main-content', '.content', '#content']) or soup
@@ -2072,24 +2233,35 @@ class CodeRedeemer:
                 allow_redirects=False
             )
             
-            if resp.status_code == 429 and retry_count < max_retries:
-                retry_count += 1
-                log_warning(f"Rate limited (429) during redemption, waiting 60 seconds before retry {retry_count}/{max_retries}")
-                time.sleep(60)
-                continue
+            # Check for 429 rate limit
+            if resp.status_code == 429:
+                self._last_429_ts = time.time()
+                if retry_count < max_retries:
+                    retry_count += 1
+                    log_warning(f"Rate limited (429) during redemption, waiting 60 seconds before retry {retry_count}/{max_retries}")
+                    time.sleep(60)
+                    continue
+                else:
+                    # All retries exhausted, still 429 - log it and return the response
+                    log_warning(f"Rate limited (429) after {max_retries} retries, returning rate limit status")
             
             return resp
     
     def _parse_redemption_response(self, resp: requests.Response) -> Tuple[RedemptionStatus, str]:
         """Parse redemption response"""
-        if resp.status_code == 200:
+        # Check status code first - never try to parse HTML for error responses
+        if resp.status_code == 429:
+            log_warning(f"Rate limited (429) response received")
+            return RedemptionStatus.RATE_LIMITED, "Rate limited - too many requests"
+        elif resp.status_code >= 400:
+            log_warning(f"HTTP error {resp.status_code} received, not parsing content")
+            return RedemptionStatus.ERROR, f"HTTP {resp.status_code} error"
+        elif resp.status_code == 200:
             content_type = resp.headers.get("Content-Type", "").lower()
             if "turbo-stream" in content_type or "html" in content_type:
                 flash_msg = self._extract_flash_message(resp.text)
                 if flash_msg:
                     return self._classify_flash_message(flash_msg), flash_msg
-        elif resp.status_code == 429:
-            return RedemptionStatus.RATE_LIMITED, "Rate limited - too many requests"
         elif resp.status_code in [302, 303, 307, 308]:
             # Handle redirect
             location = resp.headers.get("Location", "")
@@ -2110,7 +2282,7 @@ class CodeRedeemer:
     def _classify_error(self, error_msg: str) -> RedemptionStatus:
         """Classify error message into status"""
         error_lower = error_msg.lower()
-        if "rate_limited" in error_lower:
+        if "rate_limited" in error_lower or error_lower.strip() == "rate limited" or error_lower.strip() == "rate limited - too many requests":
             return RedemptionStatus.RATE_LIMITED
         elif "expired" in error_lower:
             return RedemptionStatus.EXPIRED
@@ -2118,7 +2290,7 @@ class CodeRedeemer:
             return RedemptionStatus.ALREADY_REDEEMED
         elif "not available" in error_lower or "platform" in error_lower:
             return RedemptionStatus.PLATFORM_UNAVAILABLE
-        elif "invalid" in error_lower:
+        elif "invalid" in error_lower or "not a valid shift code" in error_lower:
             return RedemptionStatus.INVALID
         elif "launch" in error_lower and "shift-enabled" in error_lower:
             return RedemptionStatus.GAME_REQUIRED
@@ -2128,13 +2300,15 @@ class CodeRedeemer:
     def _classify_flash_message(self, flash_msg: str) -> RedemptionStatus:
         """Classify flash message into status"""
         flash_lower = flash_msg.lower()
-        if "success" in flash_lower or ("redeemed" in flash_lower and "already" not in flash_lower):
+        if flash_msg == "RATE_LIMITED" or "too many requests" in flash_lower or "rate limit" in flash_lower or "unexpected error occurred" in flash_lower:
+            return RedemptionStatus.RATE_LIMITED
+        elif "success" in flash_lower or ("redeemed" in flash_lower and "already" not in flash_lower):
             return RedemptionStatus.SUCCESS
         elif "already" in flash_lower:
             return RedemptionStatus.ALREADY_REDEEMED
         elif "expired" in flash_lower:
             return RedemptionStatus.EXPIRED
-        elif "invalid" in flash_lower:
+        elif "invalid" in flash_lower or "not a valid shift code" in flash_lower:
             return RedemptionStatus.INVALID
         elif "launch" in flash_lower and "shift-enabled" in flash_lower:
             return RedemptionStatus.GAME_REQUIRED

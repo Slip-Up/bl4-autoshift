@@ -75,6 +75,9 @@ VERBOSE=1
 
 # OPTIONAL: Your timezone (use TZ identifier from https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)
 TZ=UTC
+
+# OPTIONAL: Delay between code redemption attempts (in seconds)
+DELAY_SECONDS=5
 ```
 
 3. **Start the container:**
