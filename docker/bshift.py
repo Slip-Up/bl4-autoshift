@@ -34,7 +34,7 @@ from pprint import pformat
 # Version and Constants
 # -------------------------------
 
-__version__ = "0.3"
+__version__ = "0.4"
 
 # -------------------------------
 # Debug and Analysis Tools
@@ -144,10 +144,10 @@ class HTMLDebugger:
         lines.append(f"\nText Pattern Matches:")
         for pattern, result in analysis['text_matches'].items():
             if result['found']:
-                lines.append(f"  ✓ '{pattern}' found at position {result['position']}")
+                lines.append(f"  [+] '{pattern}' found at position {result['position']}")
                 lines.append(f"    Context: {repr(result['context'][:100])}")
             else:
-                lines.append(f"  ✗ '{pattern}' not found")
+                lines.append(f"  [-] '{pattern}' not found")
         
         lines.append(f"\nAlert Elements Details:")
         for i, elem in enumerate(analysis['alert_elements']):
@@ -290,7 +290,7 @@ class Config:
         self.max_workers = 3  # Conservative for API rate limiting
         self.connection_timeout = 10
         self.read_timeout = 30
-        self.expiration_buffer_days = 3
+        self.expiration_buffer_days = 7  # Try codes for 1 week after expiration
         self.permanent_code_years = 2
         
         # Regex Patterns (compiled once)
@@ -360,9 +360,9 @@ class CodeInfo:
         if years_ahead > config.permanent_code_years:
             return False
         
-        # Apply buffer for timezone differences
-        cutoff_date = datetime.now() + timedelta(days=config.expiration_buffer_days)
-        return self.expiration_date < cutoff_date
+        # Apply buffer for timezone differences - code is valid until expiration + buffer days
+        expiration_with_buffer = self.expiration_date + timedelta(days=config.expiration_buffer_days)
+        return datetime.now() > expiration_with_buffer
 
 @dataclass
 class RedemptionResult:
@@ -402,7 +402,6 @@ def setup_logging():
 
 logger = setup_logging()
 
-# Console colors for beautiful output
 class Colors:
     HEADER = '\033[95m'
     BLUE = '\033[94m'
@@ -423,11 +422,17 @@ def log(message: str, color: str = ""):
     else:
         print(f"{Colors.GRAY}[{timestamp}]{Colors.END} {message}")
 
-def log_section(message: str):
-    """Log a section separator with smaller formatting"""
-    print(f"\n{Colors.CYAN}{'─' * 40}{Colors.END}")
-    print(f"{Colors.CYAN}{message}{Colors.END}")
-    print(f"{Colors.CYAN}{'─' * 40}{Colors.END}")
+def log_section(message: str, show_time: bool = False):
+    width = 50
+    if show_time:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        title = f"{message} - {timestamp}"
+    else:
+        title = message
+    
+    print(f"\n{Colors.CYAN}{'─' * width}{Colors.END}")
+    print(f"{Colors.CYAN}{Colors.BOLD}{title}{Colors.END}")
+    print(f"{Colors.CYAN}{'─' * width}{Colors.END}")
 
 def log_success(message: str):
     """Log a success message"""
@@ -492,24 +497,26 @@ def record_notification():
     notification_file.write_text(datetime.now().isoformat())
 
 def log_config():
-    """Log current configuration with beautiful formatting"""
-    log_section("Configuration")
+    print("")
+    print(f"{Colors.CYAN}Configuration:{Colors.END}")
     
-    log_info(f"Verbose Mode: {Colors.BOLD}{config.verbose}{Colors.END}")
-    log_info(f"Delay Between Requests: {Colors.BOLD}{config.delay_seconds}s{Colors.END}")
-    log_info(f"Max Retries: {Colors.BOLD}{config.max_retries}{Colors.END}")
-    log_info(f"Redeem Mode: {Colors.BOLD}{'Disabled' if config.no_redeem else 'Enabled'}{Colors.END}")
-    log_info(f"Target Services: {Colors.BOLD}{', '.join(config.allowed_services)}{Colors.END}")
+    # Use clean indented format
+    print(f"  {Colors.CYAN}Verbose Mode:{Colors.END} {Colors.BOLD}{config.verbose}{Colors.END}")
+    print(f"  {Colors.CYAN}Delay Between Requests:{Colors.END} {Colors.BOLD}{config.delay_seconds}s{Colors.END}")
+    print(f"  {Colors.CYAN}Max Retries:{Colors.END} {Colors.BOLD}{config.max_retries}{Colors.END}")
+    print(f"  {Colors.CYAN}Redeem Mode:{Colors.END} {Colors.BOLD}{'Disabled' if config.no_redeem else 'Enabled'}{Colors.END}")
+    print(f"  {Colors.CYAN}Target Services:{Colors.END} {Colors.BOLD}{', '.join(config.allowed_services)}{Colors.END}")
     friendly_titles = [config.title_display_names.get(title, title) for title in config.allowed_titles]
-    log_info(f"Target Titles: {Colors.BOLD}{', '.join(friendly_titles)}{Colors.END}")
+    print(f"  {Colors.CYAN}Target Titles:{Colors.END} {Colors.BOLD}{', '.join(friendly_titles)}{Colors.END}")
     
     if config.no_redeem:
-        log_warning("Redemption is disabled - codes will only be scraped")
+        print(f"  {Colors.YELLOW}[WARN] Redemption is disabled - codes will only be scraped{Colors.END}")
     elif config.email:
         email_masked = f"{config.email[:3]}***@{config.email.split('@')[1]}"
-        log_info(f"SHiFT Account: {Colors.BOLD}{email_masked}{Colors.END}")
+        print(f"  {Colors.CYAN}SHiFT Account:{Colors.END} {Colors.BOLD}{email_masked}{Colors.END}")
     else:
-        log_warning("No SHiFT credentials configured")
+        print(f"  {Colors.YELLOW}[WARN] No SHiFT credentials configured{Colors.END}")
+    print("")
 
 # -------------------------------
 # Database Management
@@ -868,7 +875,9 @@ class DatabaseManager:
             # Removed verbose debug logging
             
             if len(results) > 0:
-                log_info(f"Filtered {len(results)} codes to process from database")
+                print("")
+                log(f"Filtered {len(results)} codes to process from database")
+                print("")
             return results
     
     def get_codes_matching_current_config(self, platforms: List[str]) -> List[Tuple[str, Optional[datetime]]]:
@@ -1170,8 +1179,17 @@ class OptimizedSession:
             if config.session_file.exists():
                 session_data = json.loads(config.session_file.read_text())
                 
+                # Clear existing cookies first to avoid duplicates
+                self.session.cookies.clear()
+                
+                # Properly set cookies with domain/path information
                 for name, value in session_data.get('cookies', {}).items():
-                    self.session.cookies[name] = value
+                    self.session.cookies.set(
+                        name=name,
+                        value=value,
+                        domain='.gearboxsoftware.com',
+                        path='/'
+                    )
                 
                 self.csrf_token = session_data.get('csrf_token')
                 self.authenticated = session_data.get('authenticated', False)
@@ -1196,9 +1214,10 @@ class OptimizedSession:
                                      ["sign_out", "logout", "profile"])
                 
                 if is_authenticated:
-                    log_success("Authentication verified")
+                    if config.verbose:
+                        print(f"{Colors.GREEN}[OK] Authentication verified{Colors.END}")
                 else:
-                    log_error("Authentication failed")
+                    print(f"{Colors.RED}[FAIL] Authentication failed{Colors.END}")
                 
                 return is_authenticated
             
@@ -1218,10 +1237,12 @@ class OptimizedSession:
     def login(self, email: str, password: str) -> bool:
         """Authenticate with SHiFT website"""
         if self.authenticated and self._verify_auth():
-            log("Already authenticated")
+            if config.verbose:
+                print(f"{Colors.GREEN}[OK] Already authenticated{Colors.END}")
             return True
         
-        log("Logging in...")
+        if config.verbose:
+            print(f"{Colors.CYAN}[INFO] Logging in...{Colors.END}")
         
         try:
             # Get login page
@@ -1279,14 +1300,14 @@ class OptimizedSession:
             if self._verify_auth():
                 self.authenticated = True
                 self._save_session()
-                log_success("Successfully logged into SHiFT")
+                print(f"{Colors.GREEN}[OK] Successfully logged into SHiFT{Colors.END}")
                 return True
             else:
-                log_error("Login failed - authentication verification failed")
+                print(f"{Colors.RED}[FAIL] Login failed - authentication verification failed{Colors.END}")
                 return False
                 
         except Exception as e:
-            log_error(f"Login failed: {e}")
+            print(f"{Colors.RED}[FAIL] Login failed: {e}{Colors.END}")
             return False
     
     def get(self, url: str, **kwargs) -> requests.Response:
@@ -1781,6 +1802,23 @@ class CodeRedeemer:
         # Track last time a precheck returned valid combinations (to bias against sudden invalid)
         self._last_valid_precheck_ts = 0.0
     
+    def _deduplicate_cookies(self):
+        """Remove duplicate cookies from session to prevent 'multiple cookies with name' error"""
+        from http.cookiejar import CookieJar
+        
+        # Get current cookies
+        current_cookies = list(self.session.session.cookies)
+        
+        # Track seen cookie names (keep only the last occurrence)
+        seen = {}
+        for cookie in current_cookies:
+            seen[cookie.name] = cookie
+        
+        # Clear and re-add unique cookies
+        self.session.session.cookies.clear()
+        for cookie in seen.values():
+            self.session.session.cookies.set_cookie(cookie)
+    
     def redeem_codes_batch(self, codes_with_dates: List[Tuple[str, Optional[datetime]]]) -> List[RedemptionResult]:
         """Redeem multiple codes efficiently (codes are already pre-filtered for expiration)"""
         if not codes_with_dates:
@@ -1815,32 +1853,35 @@ class CodeRedeemer:
             if already_redeemed_count == len(config.allowed_platforms):
                 continue
             
-            log_info(f"Attempting {Colors.BOLD}{code}{Colors.END} for allowed service/title combinations")
+            print(f"\n{Colors.CYAN}[Attempting]{Colors.END} {Colors.BOLD}{code}{Colors.END}")
             results = self._redeem_code_combinations(code)
             all_results.extend(results)
             
             # Log results and check for game required status
             for result in results:
-                # Log result with appropriate colors
+                # Format platform name nicely
+                platform_display = result.platform.capitalize().ljust(10)
+                
+                # Log result with appropriate colors and tree-like structure
                 if result.status == RedemptionStatus.SUCCESS:
-                    log_code(code, "SUCCESS", f"redeemed for {result.platform} - {result.message}", Colors.GREEN)
+                    print(f"  {Colors.GREEN}{platform_display}{Colors.END} {Colors.GREEN}{result.message}{Colors.END}")
                 elif result.status == RedemptionStatus.ALREADY_REDEEMED:
-                    log_code(code, "SKIP", f"already redeemed for {result.platform}", Colors.YELLOW)
+                    print(f"  {Colors.YELLOW}{platform_display}{Colors.END} {Colors.GRAY}already redeemed{Colors.END}")
                 elif result.status == RedemptionStatus.EXPIRED:
-                    log_code(code, "EXPIRED", "code has expired", Colors.RED)
+                    print(f"  {Colors.RED}{platform_display}{Colors.END} {Colors.RED}expired{Colors.END}")
                 elif result.status == RedemptionStatus.RATE_LIMITED:
-                    log_code(code, "RATE LIMITED", "too many requests - waiting and retrying", Colors.YELLOW)
+                    print(f"  {Colors.YELLOW}{platform_display}{Colors.END} {Colors.YELLOW}rate limited - waiting{Colors.END}")
                 elif result.status == RedemptionStatus.PLATFORM_UNAVAILABLE:
-                    log_code(code, "INFO", f"{result.message}", Colors.BLUE)
+                    print(f"  {Colors.BLUE}{platform_display}{Colors.END} {Colors.GRAY}{result.message}{Colors.END}")
                 elif result.status == RedemptionStatus.TITLE_MISMATCH:
-                    log_code(code, "INFO", f"{result.message}", Colors.BLUE)
+                    print(f"  {Colors.BLUE}{platform_display}{Colors.END} {Colors.GRAY}{result.message}{Colors.END}")
                 elif result.status == RedemptionStatus.GAME_REQUIRED:
-                    log_code(code, "GAME REQUIRED", "launch SHiFT-enabled game first", Colors.YELLOW)
+                    print(f"  {Colors.YELLOW}{platform_display}{Colors.END} {Colors.YELLOW}launch game first{Colors.END}")
                     game_required_encountered = True
                     # Send Discord notification
                     self._handle_game_required_notification()
                 else:
-                    log_code(code, "FAILED", f"{result.message}", Colors.RED)
+                    print(f"  {Colors.RED}[-] {platform_display}{Colors.END} {Colors.RED}{result.message}{Colors.END}")
                 
                 # Add to database
                 db.add_redemption(result)
@@ -1852,7 +1893,7 @@ class CodeRedeemer:
         success_count = sum(1 for r in all_results if r.status == RedemptionStatus.SUCCESS)
         
         if success_count > 0:
-            log_success(f"{success_count} codes successfully redeemed")
+            print(f"\n{Colors.GREEN}[OK] Successfully redeemed {success_count} code{'s' if success_count != 1 else ''}{Colors.END}")
             
             # Check if this resolves a previous game-required block
             self._check_and_notify_resolution(all_results)
@@ -1996,7 +2037,6 @@ class CodeRedeemer:
             if available_combinations:
                 db.store_code_availability(code, available_combinations)
                 db.update_code_titles(code, available_combinations)
-                log_info(f"Stored availability data for code {code}: {len(available_combinations)} combinations")
             
             # Filter combinations by user's allowed services and titles
             valid_combinations = []
@@ -2155,7 +2195,19 @@ class CodeRedeemer:
                 elif resp.status_code != 200:
                     return {"error": f"Precheck failed with status {resp.status_code}"}
                 
-                # Only parse response if status is 200
+                # Check for empty response (can happen with 429 returning {})
+                if not resp.text or resp.text.strip() in ["{}", ""]:
+                    log_warning(f"Empty response for code {code}, treating as rate limited")
+                    self._last_429_ts = time.time()
+                    retry_count += 1
+                    if retry_count <= max_retries:
+                        log_warning(f"Empty response, waiting 60 seconds before retry {retry_count}/{max_retries}")
+                        time.sleep(60)
+                        continue
+                    else:
+                        return {"error": "rate_limited"}
+                
+                # Only parse response if status is 200 and we have content
                 parsed = self._parse_precheck_response(resp.text)
                 # If we got combinations, record recent valid precheck time
                 if isinstance(parsed, dict) and parsed.get("combinations"):
@@ -2204,6 +2256,19 @@ class CodeRedeemer:
     
     def _parse_precheck_response(self, html: str, platform: str = None) -> Dict[str, Any]:
         """Parse precheck response for all available service/title combinations"""
+        # Check if response is plain text (no HTML tags) - happens for expired codes
+        # Example: "      This SHiFT code has expired"
+        trimmed = html.strip()
+        if trimmed and '<' not in trimmed and '>' not in trimmed:
+            # Plain text response - likely an error message
+            normalized = " ".join(trimmed.split())
+            if "expired" in normalized.lower():
+                return {"error": "This SHiFT code has expired"}
+            elif "invalid" in normalized.lower():
+                return {"error": "Invalid SHiFT code"}
+            else:
+                return {"error": normalized}
+        
         soup = BeautifulSoup(html, 'html.parser')
         
         # Check for flash messages first
@@ -2333,9 +2398,12 @@ class CodeRedeemer:
                 candidates.append((text, f"turbo-stream[{idx}]", False))
 
         # Case 3: Dedicated flash containers (non-hidden)
+        # Prioritize the exact pattern used by SHiFT: <div class="alert notice"><p>...</p></div>
         flash_selectors = [
-            '.alert.notice',
-            '.alert',
+            'div.alert.notice p',  # Specific: paragraph inside alert notice div
+            'div.alert p',         # Paragraph inside any alert div
+            '.alert.notice',       # The alert notice div itself
+            '.alert',              # Any alert div
             '.flash',
             '.flash-message',
             '.notice',
@@ -2346,7 +2414,7 @@ class CodeRedeemer:
             '[data-flash]'
         ]
 
-        excluded_ids = {'shift_code_instructions', 'shift_code_error'}
+        excluded_ids = {'shift_code_instructions', 'shift_code_error', 'status_page_notification'}
 
         for selector in flash_selectors:
             for elem in soup.select(selector):
@@ -2354,8 +2422,26 @@ class CodeRedeemer:
                 if elem_id in excluded_ids:
                     continue
 
+                # Check if element itself is hidden
                 style_attr = (elem.get('style') or '').lower()
                 if 'display:none' in style_attr or 'display: none' in style_attr:
+                    continue
+                
+                # Also check if any parent element is hidden
+                # This handles cases where expired message is in a hidden container
+                is_hidden = False
+                for parent in elem.parents:
+                    if parent.name:  # Skip NavigableString parents
+                        parent_style = (parent.get('style') or '').lower()
+                        parent_id = parent.get('id') or ''
+                        if 'display:none' in parent_style or 'display: none' in parent_style:
+                            is_hidden = True
+                            break
+                        if parent_id in excluded_ids:
+                            is_hidden = True
+                            break
+                
+                if is_hidden:
                     continue
 
                 text = elem.get_text(" ", strip=True)
@@ -2459,27 +2545,51 @@ class CodeRedeemer:
         retry_count = 0
         
         while retry_count <= max_retries:
-            csrf_token = self.session.get_csrf_token()
-            if csrf_token:
-                form_data["authenticity_token"] = csrf_token
+            # The form_data already contains the correct authenticity_token from the precheck
+            # Don't overwrite it with a different token
+            # csrf_token = self.session.get_csrf_token()
+            # if csrf_token:
+            #     form_data["authenticity_token"] = csrf_token
             
+            # Deduplicate cookies before making request
+            # This prevents the "multiple cookies with name" error
+            self._deduplicate_cookies()
+            
+            # Log the form data and cookies if debug mode is enabled
+            if config.debug:
+                log_warning(f"DEBUG: Submitting form_data keys: {list(form_data.keys())}")
+                log_warning(f"DEBUG: authenticity_token present: {'authenticity_token' in form_data}")
+                log_warning(f"DEBUG: code: {form_data.get('archway_code_redemption[code]', 'NOT FOUND')}")
+                log_warning(f"DEBUG: service: {form_data.get('archway_code_redemption[service]', 'NOT FOUND')}")
+                log_warning(f"DEBUG: title: {form_data.get('archway_code_redemption[title]', 'NOT FOUND')}")
+                
+                cookies_dict = dict(self.session.session.cookies)
+                log_warning(f"DEBUG: Session has {len(cookies_dict)} cookies after dedup")
+                log_warning(f"DEBUG: _session_id present: {'_session_id' in cookies_dict}")
+                log_warning(f"DEBUG: si present: {'si' in cookies_dict}")
+            
+            # Mimic a real browser form submission, NOT an AJAX request
+            # This ensures we get proper HTML responses, not Turbo Stream responses
             headers = {
                 'Content-Type': 'application/x-www-form-urlencoded',
                 'Origin': config.base_url,
                 'Referer': f"{config.base_url}/rewards",
-                'X-Requested-With': 'XMLHttpRequest',
-                'Accept': 'text/vnd.turbo-stream.html, text/html;q=0.9, */*;q=0.8',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache',
+                'Upgrade-Insecure-Requests': '1',
             }
             
+            # First, do the POST without following redirects to see what we get
             resp = self.session.post(
                 f"{config.base_url}/code_redemptions",
                 data=form_data,
                 headers=headers,
                 timeout=(config.connection_timeout, config.read_timeout),
-                allow_redirects=False
+                allow_redirects=False  # Handle redirects manually
             )
 
-            if self.debug:
+            if config.debug:
                 log_warning(
                     f"DEBUG: Redemption POST status={resp.status_code} "
                     f"content_type={resp.headers.get('Content-Type')} "
@@ -2497,6 +2607,54 @@ class CodeRedeemer:
                 else:
                     # All retries exhausted, still 429 - log it and return the response
                     log_warning(f"Rate limited (429) after {max_retries} retries, returning rate limit status")
+                    return resp
+            
+            # If we got a redirect (302), follow it manually
+            if resp.status_code == 302:
+                redirect_url = resp.headers.get('Location')
+                if redirect_url:
+                    # Make it absolute if it's relative
+                    from urllib.parse import urljoin
+                    redirect_url = urljoin(config.base_url, redirect_url)
+                    
+                    if config.debug:
+                        log_warning(f"DEBUG: Following redirect to {redirect_url}")
+                    
+                    # Follow the first redirect (to UUID)
+                    uuid_resp = self.session.get(
+                        redirect_url,
+                        headers={'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'},
+                        timeout=(config.connection_timeout, config.read_timeout),
+                        allow_redirects=False
+                    )
+                    
+                    if config.debug:
+                        log_warning(f"DEBUG: UUID redirect status={uuid_resp.status_code}, location={uuid_resp.headers.get('Location')}")
+                    
+                    # Check if there's another redirect (to /rewards)
+                    if uuid_resp.status_code == 302:
+                        final_redirect = uuid_resp.headers.get('Location')
+                        if final_redirect:
+                            final_redirect = urljoin(config.base_url, final_redirect)
+                            
+                            if config.debug:
+                                log_warning(f"DEBUG: Following final redirect to {final_redirect}")
+                            
+                            # Get the final rewards page
+                            final_resp = self.session.get(
+                                final_redirect,
+                                headers={'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'},
+                                timeout=(config.connection_timeout, config.read_timeout),
+                                allow_redirects=False
+                            )
+                            
+                            if config.debug:
+                                log_warning(f"DEBUG: Final response status={final_resp.status_code}, content-length={len(final_resp.text)}")
+                            
+                            return final_resp
+                    
+                    # If no second redirect, return the UUID response
+                    return uuid_resp
             
             return resp
     
@@ -2510,41 +2668,52 @@ class CodeRedeemer:
             log_warning(f"HTTP error {resp.status_code} received, not parsing content")
             return RedemptionStatus.ERROR, f"HTTP {resp.status_code} error"
         
-        # After ANY redemption POST (success, redirect, etc.), check the rewards page
-        # because that's where the actual status message appears
-        try:
-            redirect_location = resp.headers.get("Location")
-            if redirect_location:
-                rewards_url = urljoin(config.base_url, redirect_location)
-            else:
-                rewards_url = f"{config.base_url}/rewards"
-
-            log_warning(f"DEBUG: Checking rewards page for updated status message via {rewards_url}...")
-            rewards_resp = self.session.get(rewards_url, timeout=(config.connection_timeout, config.read_timeout))
-            
-            if rewards_resp.status_code == 200:
-                flash_msg = self._extract_flash_message(rewards_resp.text)
-                if flash_msg:
-                    log_warning(f"DEBUG: Found status message on rewards page: '{flash_msg}'")
-                    return self._classify_flash_message(flash_msg), flash_msg
-                else:
-                    log_warning("DEBUG: No status message found on rewards page - need manual guidance for next steps")
-            else:
-                log_warning(f"DEBUG: Failed to fetch rewards page: HTTP {rewards_resp.status_code}")
-                
-        except Exception as e:
-            log_warning(f"DEBUG: Exception while checking rewards page: {e}")
-        
-        # If we can't determine status from rewards page, fall back to original response
+        # We should now have the final rewards page after following all redirects manually
         if resp.status_code == 200:
-            content_type = resp.headers.get("Content-Type", "").lower()
-            if "turbo-stream" in content_type or "html" in content_type:
-                flash_msg = self._extract_flash_message(resp.text)
-                if flash_msg:
-                    return self._classify_flash_message(flash_msg), flash_msg
+            if config.debug:
+                log_warning(f"DEBUG: Parsing final response, URL={resp.url}, length={len(resp.text)}")
+            
+            # Save HTML for analysis (only in debug mode)
+            if config.debug:
+                timestamp = datetime.now().strftime("%H%M%S_%f")[:-3]
+                filepath = self.debug_dir / f"redemption_response_{timestamp}.html"
+                try:
+                    filepath.parent.mkdir(parents=True, exist_ok=True)
+                    with open(filepath, 'w', encoding='utf-8') as f:
+                        f.write(resp.text)
+                    log_warning(f"DEBUG: Saved response HTML to {filepath}")
+                except Exception as e:
+                    log_warning(f"DEBUG: Failed to save HTML: {e}")
+            
+            # Extract the alert message from the final page
+            flash_msg = self._extract_flash_message(resp.text)
+            if flash_msg:
+                if config.debug:
+                    log_warning(f"DEBUG: Found status message: '{flash_msg}'")
+                return self._classify_flash_message(flash_msg), flash_msg
+            else:
+                if config.debug:
+                    log_warning("DEBUG: No status message found on final page")
+                    
+                    # Do a detailed analysis of what we got
+                    soup = BeautifulSoup(resp.text, 'html.parser')
+                    alert_divs = soup.select('div.alert')
+                    log_warning(f"DEBUG: Found {len(alert_divs)} div.alert elements")
+                    for i, div in enumerate(alert_divs):
+                        log_warning(f"DEBUG: Alert {i}: classes={div.get('class')}, text='{div.get_text().strip()[:100]}'")
+                    
+                    notice_divs = soup.select('.notice')
+                    log_warning(f"DEBUG: Found {len(notice_divs)} .notice elements")
+                    
+                    paragraphs = soup.select('div.alert p, div.notice p')
+                    log_warning(f"DEBUG: Found {len(paragraphs)} paragraphs in alert/notice divs")
+                    for i, p in enumerate(paragraphs):
+                        log_warning(f"DEBUG: Paragraph {i}: '{p.get_text().strip()}'")
+                
+                return RedemptionStatus.UNKNOWN, "No status message found"
         
-        # Default fallback
-        return RedemptionStatus.ERROR, f"Unable to determine redemption status"
+        # Default fallback for unexpected status codes
+        return RedemptionStatus.ERROR, f"Unexpected response: HTTP {resp.status_code}"
     
     def _classify_error(self, error_msg: str) -> RedemptionStatus:
         """Classify error message into status"""
@@ -2567,12 +2736,16 @@ class CodeRedeemer:
     def _classify_flash_message(self, flash_msg: str) -> RedemptionStatus:
         """Classify flash message into status"""
         flash_lower = flash_msg.lower()
+        
+        # Check specific messages first before checking keywords to avoid misclassification
         if flash_msg == "RATE_LIMITED" or "too many requests" in flash_lower or "rate limit" in flash_lower or "unexpected error occurred" in flash_lower:
             return RedemptionStatus.RATE_LIMITED
-        elif "success" in flash_lower or "successfully redeemed" in flash_lower or ("redeemed" in flash_lower and "already" not in flash_lower):
-            return RedemptionStatus.SUCCESS
-        elif "already" in flash_lower:
+        elif "already" in flash_lower and "redeemed" in flash_lower:
+            # "This SHiFT code has already been redeemed"
             return RedemptionStatus.ALREADY_REDEEMED
+        elif "successfully redeemed" in flash_lower or "your code was successfully redeemed" in flash_lower or ("success" in flash_lower and "redeemed" in flash_lower):
+            # "Your code was successfully redeemed"
+            return RedemptionStatus.SUCCESS
         elif "expired" in flash_lower:
             return RedemptionStatus.EXPIRED
         elif "invalid" in flash_lower or "not a valid shift code" in flash_lower or "code not found" in flash_lower:
@@ -2600,8 +2773,6 @@ class ShiftCodeManager:
     
     def run(self):
         """Main execution flow"""
-        log_info("Starting SHiFT code check...")
-        
         # Only show config if verbose mode is enabled
         if config.verbose:
             log_config()
@@ -2725,7 +2896,7 @@ class ShiftCodeManager:
         
         log_section("Code Redemption")
         friendly_titles = [config.title_display_names.get(title, title) for title in config.allowed_titles]
-        log_info(f"Redeeming {len(valid_codes)} codes on {', '.join(config.allowed_services)} for titles {', '.join(friendly_titles)}")
+        print(f"  {Colors.CYAN}Processing:{Colors.END} {Colors.BOLD}{len(valid_codes)} codes{Colors.END} on {Colors.BOLD}{', '.join(config.allowed_services)}{Colors.END} for {Colors.BOLD}{', '.join(friendly_titles)}{Colors.END}")
         
         # Redeem valid codes
         results = self.redeemer.redeem_codes_batch(valid_codes)
@@ -2767,8 +2938,8 @@ def main():
     """Application entry point"""
     import sys
     
-    # Print version at startup
-    print(f"BL4 AutoSHiFT v{__version__}")
+    # Print version at startup with timestamp
+    log_section(f"BL4 AutoSHiFT v{__version__}", show_time=True)
     
     # Handle command line arguments
     if len(sys.argv) > 1:

@@ -6,11 +6,6 @@ Automated Borderlands SHiFT code scraper and redeemer. This tool automatically s
 
 **Multi-Game Support**: Works with all Borderlands games (BL1, BL2, BL:TPS, BL3, TTW, BL4)
 
-## Release v0.3
-
-- Fixes [GitHub issue #2](https://github.com/Slip-Up/bl4-autoshift/issues/2)
-- Rewrites the SHiFT code redemption pipeline for clearer results and better stability
-
 ## Code Sources
 
 The application scrapes SHiFT codes from these gaming websites:
