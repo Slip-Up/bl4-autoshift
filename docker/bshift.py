@@ -34,7 +34,7 @@ from pprint import pformat
 # Version and Constants
 # -------------------------------
 
-__version__ = "0.4"
+__version__ = "1.0"
 
 # -------------------------------
 # Debug and Analysis Tools
@@ -349,6 +349,7 @@ class CodeInfo:
     source: str
     expiration_date: Optional[datetime] = None
     first_seen: Optional[datetime] = None
+    reward: Optional[str] = None
     
     def is_expired(self) -> bool:
         """Check if code is expired considering buffer days"""
@@ -454,8 +455,214 @@ def log_code(code: str, status: str, details: str = "", color: str = Colors.CYAN
     """Log code-related information with consistent formatting"""
     log(f"{status}: {Colors.BOLD}{code}{Colors.END} {details}", color)
 
+class DiscordNotifier:
+    """
+    Enhanced Discord notification system with embeds for BL4-AutoSHiFT
+    
+    Provides clean, professional notifications for:
+    - Code redemption reports
+    - Authentication failures
+    - Game launch requirements
+    """
+    
+    def __init__(self, webhook_url: str):
+        """
+        Initialize Discord notifier
+        
+        Args:
+            webhook_url: Discord webhook URL for sending notifications
+        """
+        self.webhook_url = webhook_url
+        self.username = "BL4-AutoSHiFT"
+        self.avatar_url = "https://images-wixmp-ed30a86b8c4ca887773594c2.wixmp.com/f/af7dfb2d-8cc1-45ab-9bab-6b0d0c655e58/dk06as6-6a40975f-0310-42d8-abad-625073ade92f.png?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1cm46YXBwOjdlMGQxODg5ODIyNjQzNzNhNWYwZDQxNWVhMGQyNmUwIiwiaXNzIjoidXJuOmFwcDo3ZTBkMTg4OTgyMjY0MzczYTVmMGQ0MTVlYTBkMjZlMCIsIm9iaiI6W1t7InBhdGgiOiIvZi9hZjdkZmIyZC04Y2MxLTQ1YWItOWJhYi02YjBkMGM2NTVlNTgvZGswNmFzNi02YTQwOTc1Zi0wMzEwLTQyZDgtYWJhZC02MjUwNzNhZGU5MmYucG5nIn1dXSwiYXVkIjpbInVybjpzZXJ2aWNlOmZpbGUuZG93bmxvYWQiXX0.ewSRBhW6vHnmTngv3yqRgPQqxDlOnRE1PZFiknhTY1E"
+        self.footer_icon_url = self.avatar_url
+        
+        # Color scheme
+        self.colors = {
+            'success': 0x23eb5b,  # Bright green for successful redemptions
+            'error': 0xe74c3c,    # Red for critical errors
+            'warning': 0xf39c12,  # Orange for warnings/action required
+            'info': 0x3498db,     # Blue for informational
+            'neutral': 0x95a5a6   # Gray for neutral updates
+        }
+    
+    def send_embed(self, title: str, description: str = None, color: str = 'info', 
+                   fields: list = None, footer: str = None, timestamp: bool = True):
+        """
+        Send a Discord embed message
+        
+        Args:
+            title: Main title of the embed
+            description: Optional description text
+            color: Color key ('success', 'error', 'warning', 'info', 'neutral')
+            fields: List of dicts with 'name' and 'value' keys
+            footer: Optional footer text
+            timestamp: Whether to include timestamp
+        """
+        embed = {
+            'title': title,
+            'color': self.colors.get(color, self.colors['info'])
+        }
+        
+        if description:
+            embed['description'] = description
+        
+        if fields:
+            embed['fields'] = fields
+        
+        if footer:
+            embed['footer'] = {
+                'text': footer,
+                'icon_url': self.footer_icon_url
+            }
+        
+        if timestamp:
+            embed['timestamp'] = datetime.now(timezone.utc).isoformat()
+        
+        payload = {
+            'username': self.username,
+            'avatar_url': self.avatar_url,
+            'embeds': [embed]
+        }
+        
+        try:
+            response = requests.post(self.webhook_url, json=payload, timeout=10)
+            
+            if response.status_code == 204:
+                return True
+            else:
+                log_warning(f"Discord notification failed: {response.status_code}")
+                return False
+        except Exception as e:
+            log_warning(f"Discord notification error: {e}")
+            return False
+    
+    def authentication_failed(self, error_message: str = None):
+        """
+        Send notification when authentication fails
+        
+        Args:
+            error_message: Optional specific error message
+        """
+        description = "Failed to authenticate with SHiFT. The bot cannot redeem codes until this is resolved."
+        
+        fields = [
+            {
+                'name': 'Action Required',
+                'value': 'Check your SHIFT_EMAIL and SHIFT_PASSWORD environment variables',
+                'inline': False
+            }
+        ]
+        
+        if error_message:
+            fields.append({
+                'name': 'Error Details',
+                'value': f"```{error_message[:500]}```",  # Truncate long errors
+                'inline': False
+            })
+        
+        return self.send_embed(
+            title='Authentication Failed',
+            description=description,
+            color='error',
+            fields=fields,
+            footer='BL4-AutoSHiFT'
+        )
+    
+    def game_launch_required(self, blocked_codes: list = None):
+        """
+        Send notification when SHiFT requires launching a game before more redemptions
+        
+        Args:
+            blocked_codes: Optional list of codes that couldn't be redeemed
+        """
+        description = "SHiFT is requiring you to launch a Borderlands game before redeeming more codes."
+        
+        fields = [
+            {
+                'name': 'Action Required',
+                'value': 'Launch any Borderlands game. The bot will automatically retry these codes on the next run.',
+                'inline': False
+            }
+        ]
+        
+        if blocked_codes:
+            # Show up to 5 blocked codes
+            codes_display = blocked_codes[:5]
+            codes_text = '\n'.join([f"`{code}`" for code in codes_display])
+            
+            if len(blocked_codes) > 5:
+                codes_text += f"\n... and {len(blocked_codes) - 5} more"
+            
+            fields.append({
+                'name': f'Blocked Codes ({len(blocked_codes)})',
+                'value': codes_text,
+                'inline': False
+            })
+        
+        return self.send_embed(
+            title='Game Launch Required',
+            description=description,
+            color='warning',
+            fields=fields,
+            footer='BL4-AutoSHiFT'
+        )
+    
+    def codes_redeemed_report(self, redemptions: list):
+        """
+        Send aggregate report of redeemed codes
+        
+        Args:
+            redemptions: List of dicts with keys: code, titles, services, rewards
+                Example: [
+                    {'code': 'XXXXX-XXXXX-...', 'titles': ['Borderlands 4'], 'services': ['Steam', 'Epic'], 'rewards': '1 Golden Key'},
+                    {'code': 'YYYYY-YYYYY-...', 'titles': ['Borderlands 3', 'Borderlands 4'], 'services': ['Steam'], 'rewards': '5 Golden Keys'}
+                ]
+        """
+        if not redemptions:
+            return False
+        
+        # Create description with summary
+        count = len(redemptions)
+        description = f"Successfully redeemed {count} code{'s' if count != 1 else ''}"
+        
+        # Build fields for each code
+        fields = []
+        
+        for i, redemption in enumerate(redemptions, 1):
+            code = redemption['code']
+            titles = redemption.get('titles', ['Unknown'])
+            services = redemption.get('services', ['Unknown'])
+            rewards = redemption.get('rewards', 'N/A')
+            
+            # Format titles and services as comma-separated lists (filter out None values)
+            titles_str = ', '.join([t for t in titles if t])
+            services_str = ', '.join([s for s in services if s])
+            
+            # Format value with all details (excluding code since it's in the title)
+            value_lines = [
+                f"**Titles:** {titles_str}",
+                f"**Services:** {services_str}",
+                f"**Rewards:** {rewards}"
+            ]
+            
+            fields.append({
+                'name': f"`{code}`",
+                'value': '\n'.join(value_lines),
+                'inline': False
+            })
+        
+        return self.send_embed(
+            title='SHiFT Codes Redeemed',
+            description=description,
+            color='success',
+            fields=fields,
+            footer='BL4-AutoSHiFT'
+        )
+
+
 def send_discord_notification(message: str, urgent: bool = False):
-    """Send notification to Discord webhook if configured"""
+    """Send notification to Discord webhook if configured (legacy function, prefer DiscordNotifier)"""
     if not config.discord_webhook_url:
         return
     
@@ -541,6 +748,13 @@ class DatabaseManager:
             
             # Create or migrate schema
             self._migrate_schema(conn)
+            
+            # Check for v3 migration (reward column)
+            cursor = conn.execute("SELECT MAX(version) FROM db_version")
+            result = cursor.fetchone()
+            current_version = result[0] if result else 0
+            if current_version and current_version < 3:
+                self.migrate_to_v3(conn)
     
     def _migrate_schema(self, conn):
         """Handle database schema migration from older versions"""
@@ -663,7 +877,8 @@ class DatabaseManager:
                 source TEXT NOT NULL,
                 first_seen_ts TEXT NOT NULL,
                 expiration_date TEXT,
-                titles TEXT
+                titles TEXT,
+                reward TEXT
             );
             
             CREATE TABLE redemptions (
@@ -706,10 +921,27 @@ class DatabaseManager:
         """)
         
         # Insert version record with parameter binding
-        conn.execute("INSERT INTO db_version (version, migrated_ts) VALUES (2, ?)", 
+        conn.execute("INSERT INTO db_version (version, migrated_ts) VALUES (3, ?)", 
                     (datetime.now(timezone.utc).isoformat(),))
         
         conn.commit()
+    
+    def migrate_to_v3(self, conn):
+        """Add reward column to existing database"""
+        try:
+            # Check if reward column exists
+            cursor = conn.execute("PRAGMA table_info(codes)")
+            columns = [row[1] for row in cursor.fetchall()]
+            
+            if 'reward' not in columns:
+                log_info("Migrating database to version 3: adding reward column")
+                conn.execute("ALTER TABLE codes ADD COLUMN reward TEXT")
+                conn.execute("UPDATE db_version SET version = 3, migrated_ts = ? WHERE id = (SELECT MAX(id) FROM db_version)",
+                           (datetime.now(timezone.utc).isoformat(),))
+                conn.commit()
+                log_info("[OK] Database migrated to version 3")
+        except Exception as e:
+            log_warning(f"Migration to v3 failed: {e}")
     
     def check_and_update_configuration(self):
         """Check if configuration changed and clear availability data if needed"""
@@ -807,13 +1039,23 @@ class DatabaseManager:
                             "UPDATE codes SET expiration_date = ? WHERE code = ?",
                             (code_info.expiration_date.isoformat(), code_info.code)
                         )
+                    elif not code_info.expiration_date and existing_exp:
+                        # Keep existing expiration if new code doesn't have one
+                        pass
+                    
+                    # Always update reward if we have new reward data
+                    if code_info.reward:
+                        conn.execute(
+                            "UPDATE codes SET reward = ? WHERE code = ?",
+                            (code_info.reward, code_info.code)
+                        )
                 else:
                     # New code
                     now = datetime.now(timezone.utc).isoformat()
                     exp_str = code_info.expiration_date.isoformat() if code_info.expiration_date else None
                     conn.execute(
-                        "INSERT INTO codes (code, source, first_seen_ts, expiration_date) VALUES (?, ?, ?, ?)",
-                        (code_info.code, code_info.source, now, exp_str)
+                        "INSERT INTO codes (code, source, first_seen_ts, expiration_date, reward) VALUES (?, ?, ?, ?, ?)",
+                        (code_info.code, code_info.source, now, exp_str, code_info.reward)
                     )
                     new_count += 1
             
@@ -821,24 +1063,35 @@ class DatabaseManager:
         
         return new_count
     
-    def get_unredeemed_codes(self, platforms: List[str]) -> List[Tuple[str, Optional[datetime]]]:
+    def get_unredeemed_codes(self, platforms: List[str]) -> List[Tuple[str, Optional[datetime], Optional[str]]]:
         """Get codes that need redemption - either unchecked or matching current user config"""
-        placeholders = ','.join(['?' for _ in platforms])
         
         with self.get_connection() as conn:
-            # Get codes that don't have any final status (success, already_redeemed, expired, title_mismatch)
-            # Note: platform_unavailable is not included as it may be a temporary failure
+            # Get codes where at least one platform hasn't been successfully redeemed yet
+            # Skip codes that have universal statuses (expired, title_mismatch) on ANY platform
+            # These statuses apply to all platforms/services, so no need to retry
+            
+            placeholders = ','.join(['?' for _ in platforms])
             cursor = conn.execute(f"""
-                SELECT DISTINCT c.code, c.expiration_date, c.titles
+                SELECT DISTINCT c.code, c.expiration_date, c.titles, c.reward
                 FROM codes c 
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM redemptions r 
-                    WHERE r.code = c.code 
-                    AND r.platform IN ({placeholders})
-                    AND r.status IN ('success', 'already_redeemed', 'expired', 'title_mismatch')
-                )
+                WHERE 
+                    -- Exclude codes with universal failure statuses (expired, title_mismatch)
+                    NOT EXISTS (
+                        SELECT 1 FROM redemptions r
+                        WHERE r.code = c.code
+                        AND r.status IN ('expired', 'title_mismatch')
+                    )
+                    -- Only include codes where not all platforms have been successfully redeemed
+                    AND (
+                        SELECT COUNT(DISTINCT r.platform)
+                        FROM redemptions r
+                        WHERE r.code = c.code
+                        AND r.platform IN ({placeholders})
+                        AND r.status IN ('success', 'already_redeemed')
+                    ) < ?
                 ORDER BY c.first_seen_ts DESC
-            """, platforms)
+            """, platforms + [len(platforms)])
             
             results = []
             # Convert internal codes back to user abbreviations for comparison
@@ -854,6 +1107,7 @@ class DatabaseManager:
                 code = row[0]
                 exp_str = row[1]
                 titles_csv = row[2]
+                reward = row[3]
                 
                 exp_date = datetime.fromisoformat(exp_str) if exp_str else None
                 
@@ -870,7 +1124,7 @@ class DatabaseManager:
                         should_process = True
                 
                 if should_process:
-                    results.append((code, exp_date))
+                    results.append((code, exp_date, reward))
             
             # Removed verbose debug logging
             
@@ -1829,9 +2083,10 @@ class CodeRedeemer:
         
         all_results = []
         game_required_encountered = False
+        total_codes = len(codes_with_dates)
         
         # Process each code for all allowed service/title combinations
-        for code, exp_date in codes_with_dates:
+        for code_index, (code, exp_date) in enumerate(codes_with_dates, 1):
             if game_required_encountered:
                 # Mark remaining codes as game_required without attempting redemption
                 for platform in config.allowed_platforms:
@@ -1853,7 +2108,7 @@ class CodeRedeemer:
             if already_redeemed_count == len(config.allowed_platforms):
                 continue
             
-            print(f"\n{Colors.CYAN}[Attempting]{Colors.END} {Colors.BOLD}{code}{Colors.END}")
+            print(f"\n{Colors.CYAN}[Attempting {code_index}/{total_codes}]{Colors.END} {Colors.BOLD}{code}{Colors.END}")
             results = self._redeem_code_combinations(code)
             all_results.extend(results)
             
@@ -1940,20 +2195,17 @@ class CodeRedeemer:
         if not should_send_notification():
             log_warning("Game launch required - notification skipped (within cooldown period)")
             return
+        
+        if not config.discord_webhook_url:
+            return
             
-        pending_count = len(db.get_game_required_codes(config.allowed_platforms))
+        # Get blocked codes
+        blocked_codes = [code for code, _ in db.get_game_required_codes(config.allowed_platforms)]
         
-        message = (
-            "**SHiFT Redemption Blocked**\n\n"
-            "Gearbox now requires launching a SHiFT-enabled game before redeeming codes.\n\n"
-            "**Action Required:**\n"
-            "1. Launch any Borderlands game\n"
-            "2. Sign into SHiFT in-game\n"
-            "3. Script will automatically retry on next run\n\n"
-            f"**Status:** {pending_count} codes waiting for redemption"
-        )
+        # Send notification with new Discord notifier
+        notifier = DiscordNotifier(config.discord_webhook_url)
+        notifier.game_launch_required(blocked_codes=blocked_codes)
         
-        send_discord_notification(message)
         record_notification()
         log_warning("Game launch required - Discord notification sent")
     
@@ -2786,11 +3038,14 @@ class ShiftCodeManager:
         # Also check for codes we know work with current config
         matching_codes = db.get_codes_matching_current_config(config.allowed_platforms)
         
-        # Combine and deduplicate codes
+        # Combine and deduplicate codes (keep reward from unredeemed_codes if available)
         all_codes_dict = {}
-        for code, exp_date in unredeemed_codes + matching_codes:
-            all_codes_dict[code] = exp_date
-        all_codes_to_redeem = [(code, exp_date) for code, exp_date in all_codes_dict.items()]
+        for code, exp_date, reward in unredeemed_codes:
+            all_codes_dict[code] = (exp_date, reward)
+        for code, exp_date in matching_codes:
+            if code not in all_codes_dict:
+                all_codes_dict[code] = (exp_date, None)
+        all_codes_to_redeem = [(code, exp_date, reward) for code, (exp_date, reward) in all_codes_dict.items()]
         
         if new_count > 0 or all_codes_to_redeem:
             self._redeem_pending_codes(all_codes_to_redeem)
@@ -2850,7 +3105,7 @@ class ShiftCodeManager:
         
         return new_count
     
-    def _redeem_pending_codes(self, unredeemed_codes: List[Tuple[str, Optional[datetime]]]):
+    def _redeem_pending_codes(self, unredeemed_codes: List[Tuple[str, Optional[datetime], Optional[str]]]):
         """Handle code redemption"""
         if config.no_redeem:
             log("NO_REDEEM is enabled, skipping redemption")
@@ -2863,6 +3118,12 @@ class ShiftCodeManager:
         # Authenticate
         if not self.session.login(config.email, config.password):
             log("ERROR: Authentication failed")
+            
+            # Send Discord notification
+            if config.discord_webhook_url:
+                notifier = DiscordNotifier(config.discord_webhook_url)
+                notifier.authentication_failed("Failed to authenticate with SHiFT")
+            
             return
         
         if not unredeemed_codes:
@@ -2871,10 +3132,11 @@ class ShiftCodeManager:
         
         # Pre-filter expired codes before redemption attempts
         valid_codes = []
+        valid_rewards = {}  # Store rewards for valid codes
         expired_codes = []
         
-        for code, exp_date in unredeemed_codes:
-            code_info = CodeInfo(code=code, source="", expiration_date=exp_date)
+        for code, exp_date, reward in unredeemed_codes:
+            code_info = CodeInfo(code=code, source="", expiration_date=exp_date, reward=reward)
             if code_info.is_expired():
                 expired_codes.append(code)
                 # Only log expired codes in verbose mode
@@ -2883,6 +3145,8 @@ class ShiftCodeManager:
                     log_code(code, "SKIPPED", f"(expired: {exp_str})", Colors.YELLOW)
             else:
                 valid_codes.append((code, exp_date))
+                if reward:
+                    valid_rewards[code] = reward
         
         # Mark expired codes in database without attempting redemption
         if expired_codes:
@@ -2907,6 +3171,44 @@ class ShiftCodeManager:
             
             if success_count > 0:
                 log_success(f"{success_count} codes successfully redeemed")
+                
+                # Send Discord notification for successful redemptions
+                if config.discord_webhook_url:
+                    # Collect unique successful codes (may have multiple results per code for different services)
+                    successful_codes = {}
+                    for r in results:
+                        if r.status == RedemptionStatus.SUCCESS:
+                            if r.code not in successful_codes:
+                                successful_codes[r.code] = {
+                                    'services': [],
+                                    'game_names': set()
+                                }
+                            successful_codes[r.code]['services'].append(r.platform)
+                            # Extract game name from the message if present
+                            if '(' in r.message and ')' in r.message:
+                                game_name = r.message[r.message.rfind('(')+1:r.message.rfind(')')]
+                                successful_codes[r.code]['game_names'].add(game_name)
+                    
+                    # Build redemption list with rewards
+                    redemptions = []
+                    for code, data in successful_codes.items():
+                        # Get reward for this code
+                        reward = valid_rewards.get(code, 'N/A')
+                        
+                        # Get game names from collected data or fall back to config
+                        titles = list(data['game_names']) if data['game_names'] else friendly_titles
+                        
+                        redemptions.append({
+                            'code': code,
+                            'titles': titles,
+                            'services': data['services'],
+                            'rewards': reward
+                        })
+                    
+                    # Send Discord notification
+                    if redemptions:
+                        notifier = DiscordNotifier(config.discord_webhook_url)
+                        notifier.codes_redeemed_report(redemptions)
             
             # Only show expired count if verbose and there are expired codes
             if config.verbose and expired_codes:
@@ -2977,7 +3279,9 @@ def main():
             codes = db.get_unredeemed_codes(config.allowed_platforms)[:1]
             if codes:
                 log(f"Testing HTML parsing with code: {codes[0][0]}")
-                results = app.redeemer.redeem_codes_batch(codes)
+                # Extract just code and expiration for batch processing
+                codes_for_batch = [(code, exp_date) for code, exp_date, _ in codes]
+                results = app.redeemer.redeem_codes_batch(codes_for_batch)
                 for result in results:
                     log(f"Result: {result.status} - {result.message}")
             else:

@@ -67,7 +67,12 @@ ALLOWED_TITLES=bl4
 # OPTIONAL: How often to run (in seconds)
 SCHEDULE_INTERVAL=3600  # 3600 = 1 hour
 
-# OPTIONAL: Discord webhook for notifications on shift site lockout, where it requires you to open a game before a code can be redeemed
+# OPTIONAL: Discord webhook URL for notifications
+# Notifications include:
+# - Successful code redemptions with rewards/titles/services
+# - Authentication failures requiring action
+# - Game launch requirements (SHiFT lockout)
+# Create a webhook in Discord: Server Settings > Integrations > Webhooks > New Webhook
 DISCORD_WEBHOOK_URL=
 
 # OPTIONAL: Enable detailed logging
@@ -127,7 +132,7 @@ ALLOWED_SERVICES=steam,epic
 
 - **SCHEDULE_INTERVAL** - Seconds between runs (default: 3600 = 1 hour)
 - **VERBOSE** - Enable detailed logging: 1 or 0 (default: 1)
-- **DISCORD_WEBHOOK_URL** - Discord webhook for notifications when the shift site requires you to open a game before you can redeem another key.
+- **DISCORD_WEBHOOK_URL** - Discord webhook for notifications (see Discord Integration section)
 - **TZ** - Container timezone (default: UTC, i.e.: America/New_York)
 
 ## Platform Linking Setup
@@ -149,6 +154,37 @@ Gearbox sometimes requires launching a SHiFT-enabled game before allowing code r
 2. Discord notification is sent (if configured)
 3. Launch any Borderlands game and sign into SHiFT in-game
 4. The scraper automatically resumes on the next run
+
+## Discord Integration
+
+Configure a Discord webhook to receive notifications about code redemptions and issues.
+
+### Setup Discord Webhook
+
+1. Open Discord and navigate to your server
+2. Go to Server Settings > Integrations > Webhooks
+3. Click "New Webhook" or "Create Webhook"
+4. Give it a name (e.g., "BL4 AutoSHiFT")
+5. Select the channel for notifications
+6. Copy the Webhook URL
+7. Add to your `.env` file: `DISCORD_WEBHOOK_URL=<your_webhook_url>`
+
+### Notification Types
+
+**Successful Redemptions** (Green Embed)
+- Displays each redeemed code with details
+- Shows game titles, platforms (Steam/Epic/etc), and rewards
+- Example: "1 Golden Key", "5 Golden Keys", "Cosmetic Pack: Vault Hunter Bundle"
+
+**Authentication Failures** (Red Embed)
+- Alerts when login to SHiFT fails
+- Includes error details and required actions
+- Check your SHIFT_EMAIL and SHIFT_PASSWORD settings
+
+**Game Launch Required** (Orange Embed)
+- Notifies when SHiFT requires launching a game
+- Lists up to 5 affected codes
+- Automatically retries on next run after you launch a game
 
 ## Database
 
