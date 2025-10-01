@@ -21,17 +21,163 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
-from urllib.parse import quote
+from urllib.parse import quote, urljoin
 
 import requests
 from bs4 import BeautifulSoup
 from dotenv import dotenv_values
+import hashlib
+import traceback
+from pprint import pformat
 
 # -------------------------------
 # Version and Constants
 # -------------------------------
 
-__version__ = "0.2.4"
+__version__ = "0.3"
+
+# -------------------------------
+# Debug and Analysis Tools
+# -------------------------------
+
+class HTMLDebugger:
+    """Advanced HTML debugging and analysis tools"""
+    
+    def __init__(self, save_dir="/app/logs"):
+        self.save_dir = Path(save_dir)
+        self.save_dir.mkdir(exist_ok=True)
+    
+    def save_html(self, html_content: str, prefix: str = "debug") -> str:
+        """Save HTML content to file with timestamp"""
+        timestamp = datetime.now().strftime("%H%M%S_%f")[:-3]  # milliseconds
+        hash_suffix = hashlib.md5(html_content.encode()).hexdigest()[:8]
+        filename = f"{prefix}_{timestamp}_{hash_suffix}.html"
+        filepath = self.save_dir / filename
+        
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            return str(filepath)
+        except Exception as e:
+            log_warning(f"Failed to save HTML file: {e}")
+            return ""
+    
+    def analyze_alerts(self, html_content: str) -> Dict[str, Any]:
+        """Comprehensive analysis of alert elements in HTML"""
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        analysis = {
+            'total_alerts': 0,
+            'alert_elements': [],
+            'text_matches': {},
+            'selectors_tested': {}
+        }
+        
+        # Find all potential alert elements
+        alert_selectors = [
+            'div[class*="alert"]',
+            '.alert',
+            '.notice', 
+            '.error',
+            '.message',
+            '.alert.notice',
+            'div.alert.notice'
+        ]
+        
+        for selector in alert_selectors:
+            elements = soup.select(selector)
+            analysis['selectors_tested'][selector] = len(elements)
+            
+            for elem in elements:
+                elem_info = {
+                    'tag': elem.name,
+                    'classes': elem.get('class', []),
+                    'id': elem.get('id', ''),
+                    'style': elem.get('style', ''),
+                    'text': elem.get_text().strip(),
+                    'html': str(elem)[:200] + '...' if len(str(elem)) > 200 else str(elem),
+                    'selector_found': selector
+                }
+                analysis['alert_elements'].append(elem_info)
+        
+        analysis['total_alerts'] = len(analysis['alert_elements'])
+        
+        # Check for specific text patterns
+        text_patterns = [
+            'this shift code has already been redeemed',
+            'this shift code has expired',
+            'this is not a valid shift code',
+            'invalid code',
+            'redeemed',
+            'expired'
+        ]
+        
+        html_lower = html_content.lower()
+        for pattern in text_patterns:
+            if pattern in html_lower:
+                # Find context around the match
+                match_pos = html_lower.find(pattern)
+                start = max(0, match_pos - 100)
+                end = min(len(html_content), match_pos + len(pattern) + 100)
+                context = html_content[start:end]
+                
+                analysis['text_matches'][pattern] = {
+                    'found': True,
+                    'position': match_pos,
+                    'context': context
+                }
+            else:
+                analysis['text_matches'][pattern] = {'found': False}
+        
+        return analysis
+    
+    def format_analysis(self, analysis: Dict[str, Any]) -> str:
+        """Format analysis results for readable output"""
+        lines = []
+        lines.append(f"=== HTML ANALYSIS RESULTS ===")
+        lines.append(f"Total alert elements found: {analysis['total_alerts']}")
+        
+        lines.append(f"\nSelector Results:")
+        for selector, count in analysis['selectors_tested'].items():
+            lines.append(f"  {selector}: {count} elements")
+        
+        lines.append(f"\nText Pattern Matches:")
+        for pattern, result in analysis['text_matches'].items():
+            if result['found']:
+                lines.append(f"  ✓ '{pattern}' found at position {result['position']}")
+                lines.append(f"    Context: {repr(result['context'][:100])}")
+            else:
+                lines.append(f"  ✗ '{pattern}' not found")
+        
+        lines.append(f"\nAlert Elements Details:")
+        for i, elem in enumerate(analysis['alert_elements']):
+            lines.append(f"  Alert {i}:")
+            lines.append(f"    Classes: {elem['classes']}")
+            lines.append(f"    Text: '{elem['text']}'")
+            lines.append(f"    Style: '{elem['style']}'")
+            lines.append(f"    Found by: {elem['selector_found']}")
+        
+        return "\n".join(lines)
+
+class DebugLogger:
+    """Enhanced logging for debugging"""
+    
+    @staticmethod
+    def log_with_context(message: str, context: Dict[str, Any] = None):
+        """Log message with additional context"""
+        log_warning(f"DEBUG: {message}")
+        if context:
+            log_warning(f"DEBUG CONTEXT: {pformat(context, width=120, depth=3)}")
+    
+    @staticmethod
+    def log_exception(message: str, exception: Exception):
+        """Log exception with full traceback"""
+        log_warning(f"DEBUG EXCEPTION: {message}")
+        log_warning(f"DEBUG TRACEBACK: {traceback.format_exc()}")
+
+# Global debug tools
+html_debugger = HTMLDebugger()
+debug_logger = DebugLogger()
 
 # -------------------------------
 # Configuration and Constants
@@ -1620,6 +1766,13 @@ class CodeRedeemer:
     
     def __init__(self, session: OptimizedSession):
         self.session = session
+        # Debug settings from global config
+        self.debug = config.debug
+        self.debug_dir = config.debug_dir
+        if self.debug:
+            self.debug_dir.mkdir(parents=True, exist_ok=True)
+            log_warning(f"DEBUG: Flash message debug directory initialized at {self.debug_dir}")
+        self.html_debugger = HTMLDebugger(save_dir=str(self.debug_dir if self.debug else Path('/app/logs')))
         # Track suspicious invalid streaks that likely indicate rate limiting
         self._suspect_invalid_streak = 0
         self._last_suspect_ts = 0.0
@@ -1906,33 +2059,41 @@ class CodeRedeemer:
                     result = self._submit_redemption(form_data)
                     status, message = self._parse_redemption_response(result)
 
-                    # If precheck proved this code has valid combinations, but redemption
-                    # reports invalid (or message contains the exact invalid phrase), treat as rate limit.
-                    if available_combinations and (
-                        status == RedemptionStatus.INVALID or 
-                        (message and 'not a valid shift code' in message.lower())
-                    ):
-                        now = time.time()
-                        # Count a suspicious invalid toward streak
-                        if now - self._last_suspect_ts > 120:
-                            # Reset streak if it has been a while
-                            self._suspect_invalid_streak = 0
-                        self._last_suspect_ts = now
-                        self._suspect_invalid_streak += 1
-
-                        log_warning(
-                            "Suspicious INVALID received after successful precheck; treating as rate limiting"
-                        )
-                        status = RedemptionStatus.RATE_LIMITED
-                        message = "Rate limited - treating temporary invalid as throttling"
+                    # If precheck proved this code has valid combinations, but redemption reports invalid,
+                    # only treat as suspicious rate limiting if it's a generic "invalid" without legitimate context.
+                    # Do NOT treat legitimate statuses like ALREADY_REDEEMED, EXPIRED as suspicious.
+                    if (available_combinations and 
+                        status == RedemptionStatus.INVALID and 
+                        message and
+                        # Only proceed if this isn't a clearly legitimate error
+                        status not in [RedemptionStatus.ALREADY_REDEEMED, RedemptionStatus.EXPIRED]):
                         
-                        # Back off to avoid hammering the site
-                        backoff = 60
-                        log_warning(f"Backing off for {backoff}s due to suspected rate limiting")
-                        time.sleep(backoff)
+                        message_lower = message.lower()
                         
-                        # Optionally refresh redemption page to clear any stale UI state
-                        self._refresh_redemption_page()
+                        # Check if this looks like a legitimate specific error vs. a generic rate-limit-induced error
+                        legitimate_error_patterns = [
+                            'already redeemed', 'already been redeemed', 'this shift code has already been redeemed',
+                            'expired', 'this shift code has expired', 'code expired',
+                            'invalid shift code', 'this is not a valid shift code',
+                            'code not found', 'not found'
+                        ]
+                        
+                        # Generic messages that might indicate rate limiting
+                        generic_invalid_patterns = [
+                            'invalid code',  # Generic message that could be rate limiting
+                            'error occurred'  # Generic error
+                        ]
+                        
+                        is_legitimate_specific = any(pattern in message_lower for pattern in legitimate_error_patterns)
+                        is_generic_invalid = any(pattern in message_lower for pattern in generic_invalid_patterns)
+                        
+                        # Only treat as suspicious if it's a generic invalid message after successful precheck
+                        # BUT: Most "Invalid code" responses after successful precheck are actually legitimate errors
+                        # (like "already redeemed") that are being misclassified. Don't treat as rate limiting.
+                        if is_generic_invalid and not is_legitimate_specific:
+                            log_info(f"Generic invalid message '{message}' after successful precheck - likely legitimate error, not rate limiting")
+                        else:
+                            log_info(f"Legitimate specific error detected: '{message}' - not treating as rate limiting")
                     
                     # Add game name to message for clarity
                     message_with_game = f"{message} ({game_name})"
@@ -2127,92 +2288,157 @@ class CodeRedeemer:
         return {"combinations": available_combinations}
     
     def _extract_flash_message(self, html: str) -> Optional[str]:
-        """Extract flash message from HTML"""
+        """Extract meaningful flash/status message from SHiFT rewards HTML."""
+        if not html:
+            return None
+
+        if self.debug:
+            # Persist HTML snapshot for analysis
+            timestamp = datetime.now().strftime("%m%d%S_%f")[:-3]
+            content_hash = hashlib.md5(html.encode()).hexdigest()[:8]
+            filename = f"rewards_page_{timestamp}_{content_hash}.html"
+            filepath = self.debug_dir / filename
+
+            try:
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    f.write(html)
+                log_warning(f"DEBUG: Saved HTML to {filepath}")
+            except Exception as exc:
+                log_warning(f"DEBUG: Failed to persist HTML snapshot: {exc}")
+
+            # Provide structured analysis for manual review
+            analysis = self.html_debugger.analyze_alerts(html)
+            analysis_report = self.html_debugger.format_analysis(analysis)
+            log_warning(f"DEBUG HTML ANALYSIS:\n{analysis_report}")
+
+        trimmed = html.strip()
+        if not trimmed:
+            if self.debug:
+                log_warning("DEBUG: Flash extraction received empty HTML after trimming")
+            return None
+
+        candidates: List[Tuple[str, str, bool]] = []  # (text, source, is_plain_text)
+
+        # Case 1: Turbo stream often returns plain text snippets with no HTML tags
+        if '<' not in trimmed and '>' not in trimmed:
+            candidates.append((trimmed, "plain_text_response", True))
+
         soup = BeautifulSoup(html, 'html.parser')
-        
-        # First, check for current redemption results (most reliable)
-        code_results = soup.find(id='code_results')
-        if code_results and code_results.get('style') != 'display:none;':
-            result_text = code_results.get_text().strip()
-            if result_text and result_text not in ["Please wait", ""]:
-                # Debug logging to see what we're getting
-                log_warning(f"DEBUG: code_results content: '{result_text}'")
-                
-                # Look for specific SHiFT error messages and return only those
-                result_text_lower = result_text.lower()
-                # First check for rate limiting indicators - "Unexpected error occurred" means 429
-                if 'unexpected error occurred' in result_text_lower:
-                    log_warning(f"DEBUG: Found 'Unexpected error occurred' in code_results - treating as rate limited")
-                    return "RATE_LIMITED"
-                elif 'rate limit' in result_text_lower or 'too many requests' in result_text_lower or 'slow down' in result_text_lower or 'temporarily unavailable' in result_text_lower:
-                    return "RATE_LIMITED"
-                elif 'this is not a valid shift code' in result_text_lower:
-                    log_warning(f"DEBUG: Returning 'This is not a valid SHiFT code' from code_results")
-                    return "This is not a valid SHiFT code"
-                elif 'this shift code has expired' in result_text_lower:
-                    return "This SHiFT code has expired"
-                elif 'this shift code has already been redeemed' in result_text_lower:
-                    return "This SHiFT code has already been redeemed"
-                elif 'invalid shift code' in result_text_lower:
-                    return "Invalid SHiFT code"
-                elif 'code not found' in result_text_lower:
-                    return "Code not found"
-                elif 'already redeemed' in result_text_lower:
-                    return "Already redeemed"
-                elif 'expired' in result_text_lower:
-                    return "Code expired"
-                
-                # If no specific error pattern found, return None to try other methods
-                return None
-        
-        # Then check for fresh flash messages (excluding stale alert notices)
-        fresh_flash_selectors = ['.flash', '.error', '.message', '[data-flash]', '#flash', '.flash-message', '.alert-danger', '.error-message']
-        
-        for selector in fresh_flash_selectors:
-            flash_elem = soup.select_one(selector)
-            if flash_elem:
-                text = flash_elem.get_text().strip()
+
+        # Case 2: Turbo Stream template payloads
+        for idx, turbo_stream in enumerate(soup.find_all('turbo-stream')):
+            template = turbo_stream.find('template')
+            text = template.get_text(" ", strip=True) if template else turbo_stream.get_text(" ", strip=True)
+            if text:
+                candidates.append((text, f"turbo-stream[{idx}]", False))
+
+        # Case 3: Dedicated flash containers (non-hidden)
+        flash_selectors = [
+            '.alert.notice',
+            '.alert',
+            '.flash',
+            '.flash-message',
+            '.notice',
+            '.error',
+            '.message',
+            '#flash_messages',
+            '#flash',
+            '[data-flash]'
+        ]
+
+        excluded_ids = {'shift_code_instructions', 'shift_code_error'}
+
+        for selector in flash_selectors:
+            for elem in soup.select(selector):
+                elem_id = elem.get('id') or ''
+                if elem_id in excluded_ids:
+                    continue
+
+                style_attr = (elem.get('style') or '').lower()
+                if 'display:none' in style_attr or 'display: none' in style_attr:
+                    continue
+
+                text = elem.get_text(" ", strip=True)
                 if text:
-                    return text
-        
-        # Also check for any visible error containers that might contain the message
-        # But ignore hidden elements (display:none) as they contain misleading cached text
-        error_containers = soup.select('#shift_code_instructions, #shift_code_error, .sh_status_container_code_redemption')
-        for container in error_containers:
-            # Skip hidden elements completely - they contain stale/misleading text
-            if container and container.get('style') and 'display:none' in container.get('style', ''):
+                    candidates.append((text, f"selector:{selector}", False))
+
+        seen: Set[str] = set()
+        for text, source, is_plain in candidates:
+            normalized = " ".join(text.split())
+            if not normalized:
                 continue
-            if container and container.get('style') != 'display:none;':
-                text = container.get_text().strip()
-                if text and text != "Please wait":
-                    # Check for rate limiting first
-                    text_lower = text.lower()
-                    if 'unexpected error occurred' in text_lower:
-                        log_warning(f"DEBUG: Found 'Unexpected error occurred' in container - treating as rate limited")
-                        return "RATE_LIMITED"
-                    # Only return known error patterns to avoid concatenation
-                    elif 'this is not a valid shift code' in text_lower:
-                        return "This is not a valid SHiFT code"
-                    elif 'already been redeemed' in text_lower:
-                        return "Already redeemed"
-                    elif 'expired' in text_lower:
-                        return "Code expired"
-                    elif 'invalid' in text_lower and 'code' in text_lower:
-                        return "Invalid code"
-        
-        # As a last resort, check for patterns in main content (but be very specific)
-        main_content = soup.find(['main', '.main-content', '.content', '#content']) or soup
-        text_content = main_content.get_text().lower()
-        
-        # Only check for these patterns if we didn't find a code_results element
-        if not code_results:
-            if "this shift code has already been redeemed" in text_content:
-                return "Already redeemed"
-            elif "expired" in text_content and "code" in text_content:
-                return "Code expired"
-            elif "invalid" in text_content and "code" in text_content:
-                return "Invalid code"
-        
+
+            key = normalized.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+
+            message = self._normalize_flash_message_text(normalized, is_plain)
+            if message:
+                if self.debug:
+                    log_warning(f"DEBUG: Flash message detected from {source}: '{message}'")
+                return message
+
+        if self.debug:
+            log_warning("DEBUG: No actionable flash message detected")
+
+        return None
+
+    def _normalize_flash_message_text(self, text: str, allow_generic: bool) -> Optional[str]:
+        """Return canonical flash message if the text matches a known pattern."""
+        if not text:
+            return None
+
+        normalized = " ".join(text.split())
+        lower = normalized.lower()
+
+        # Prioritise success detection before broader keyword matching so
+        # instructional copy that mentions multiple outcomes doesn't override
+        # a genuine success alert.
+        if 'successfully redeemed' in lower or (
+            'your code' in lower and 'successfully' in lower
+        ) or (
+            'redeemed' in lower and 'success' in lower
+        ):
+            return "Successfully redeemed"
+
+        pattern_map: List[Tuple[List[str], str]] = [
+            (['already', 'redeemed'], "This SHiFT code has already been redeemed"),
+            (['has', 'expired'], "This SHiFT code has expired"),
+            (['not a valid shift code'], "This is not a valid SHiFT code"),
+            (['invalid shift code'], "Invalid SHiFT code"),
+            (['invalid code'], "Invalid code"),
+            (['code', 'not', 'found'], "Code not found"),
+            (['unexpected error occurred'], "Unexpected error occurred"),
+            (['too many requests'], "Rate limited - too many requests"),
+            (['rate limit'], "Rate limited - too many requests"),
+            (['temporarily unavailable'], "Rate limited - too many requests"),
+            (['launch', 'shift-enabled'], "Launch SHiFT-enabled game required"),
+            (['launch', 'shift enabled'], "Launch SHiFT-enabled game required"),
+            (['not available for your selected platform'], "Not available for your selected platform"),
+            (['not available for your platform'], "Not available for your selected platform"),
+            (['service is currently unavailable'], "Service unavailable"),
+            (['temporarily', 'disabled'], "Service unavailable"),
+            (['server', 'error'], "Server error"),
+        ]
+
+        for keywords, canonical in pattern_map:
+            if all(keyword in lower for keyword in keywords):
+                return canonical
+
+        # Allow generic return only when the response was plain text (no HTML tags)
+        if allow_generic:
+            return normalized
+
+        # Ignore lengthy instructional text that doesn't map to actionable status
+        if len(normalized) > 160:
+            return None
+
+        # As a fallback, recognize short messages that include redemption keywords
+        keyword_whitelist = ['redeem', 'code', 'shift', 'reward']
+        if any(word in lower for word in keyword_whitelist) and len(normalized) <= 140:
+            return normalized
+
         return None
     
     def _refresh_redemption_page(self) -> bool:
@@ -2252,6 +2478,13 @@ class CodeRedeemer:
                 timeout=(config.connection_timeout, config.read_timeout),
                 allow_redirects=False
             )
+
+            if self.debug:
+                log_warning(
+                    f"DEBUG: Redemption POST status={resp.status_code} "
+                    f"content_type={resp.headers.get('Content-Type')} "
+                    f"location={resp.headers.get('Location')}"
+                )
             
             # Check for 429 rate limit
             if resp.status_code == 429:
@@ -2268,36 +2501,50 @@ class CodeRedeemer:
             return resp
     
     def _parse_redemption_response(self, resp: requests.Response) -> Tuple[RedemptionStatus, str]:
-        """Parse redemption response"""
-        # Check status code first - never try to parse HTML for error responses
+        """Parse redemption response by checking the updated rewards page"""
+        # Check status code first 
         if resp.status_code == 429:
             log_warning(f"Rate limited (429) response received")
             return RedemptionStatus.RATE_LIMITED, "Rate limited - too many requests"
         elif resp.status_code >= 400:
             log_warning(f"HTTP error {resp.status_code} received, not parsing content")
             return RedemptionStatus.ERROR, f"HTTP {resp.status_code} error"
-        elif resp.status_code == 200:
+        
+        # After ANY redemption POST (success, redirect, etc.), check the rewards page
+        # because that's where the actual status message appears
+        try:
+            redirect_location = resp.headers.get("Location")
+            if redirect_location:
+                rewards_url = urljoin(config.base_url, redirect_location)
+            else:
+                rewards_url = f"{config.base_url}/rewards"
+
+            log_warning(f"DEBUG: Checking rewards page for updated status message via {rewards_url}...")
+            rewards_resp = self.session.get(rewards_url, timeout=(config.connection_timeout, config.read_timeout))
+            
+            if rewards_resp.status_code == 200:
+                flash_msg = self._extract_flash_message(rewards_resp.text)
+                if flash_msg:
+                    log_warning(f"DEBUG: Found status message on rewards page: '{flash_msg}'")
+                    return self._classify_flash_message(flash_msg), flash_msg
+                else:
+                    log_warning("DEBUG: No status message found on rewards page - need manual guidance for next steps")
+            else:
+                log_warning(f"DEBUG: Failed to fetch rewards page: HTTP {rewards_resp.status_code}")
+                
+        except Exception as e:
+            log_warning(f"DEBUG: Exception while checking rewards page: {e}")
+        
+        # If we can't determine status from rewards page, fall back to original response
+        if resp.status_code == 200:
             content_type = resp.headers.get("Content-Type", "").lower()
             if "turbo-stream" in content_type or "html" in content_type:
                 flash_msg = self._extract_flash_message(resp.text)
                 if flash_msg:
                     return self._classify_flash_message(flash_msg), flash_msg
-        elif resp.status_code in [302, 303, 307, 308]:
-            # Handle redirect
-            location = resp.headers.get("Location", "")
-            
-            if not location.startswith("http"):
-                location = config.base_url + location if location.startswith("/") else f"{config.base_url}/{location}"
-            
-            try:
-                redirect_resp = self.session.get(location, timeout=(config.connection_timeout, config.read_timeout))
-                flash_msg = self._extract_flash_message(redirect_resp.text)
-                if flash_msg:
-                    return self._classify_flash_message(flash_msg), flash_msg
-            except Exception:
-                pass
         
-        return RedemptionStatus.ERROR, f"HTTP {resp.status_code}: {resp.text[:200]}"
+        # Default fallback
+        return RedemptionStatus.ERROR, f"Unable to determine redemption status"
     
     def _classify_error(self, error_msg: str) -> RedemptionStatus:
         """Classify error message into status"""
@@ -2322,16 +2569,20 @@ class CodeRedeemer:
         flash_lower = flash_msg.lower()
         if flash_msg == "RATE_LIMITED" or "too many requests" in flash_lower or "rate limit" in flash_lower or "unexpected error occurred" in flash_lower:
             return RedemptionStatus.RATE_LIMITED
-        elif "success" in flash_lower or ("redeemed" in flash_lower and "already" not in flash_lower):
+        elif "success" in flash_lower or "successfully redeemed" in flash_lower or ("redeemed" in flash_lower and "already" not in flash_lower):
             return RedemptionStatus.SUCCESS
         elif "already" in flash_lower:
             return RedemptionStatus.ALREADY_REDEEMED
         elif "expired" in flash_lower:
             return RedemptionStatus.EXPIRED
-        elif "invalid" in flash_lower or "not a valid shift code" in flash_lower:
+        elif "invalid" in flash_lower or "not a valid shift code" in flash_lower or "code not found" in flash_lower:
             return RedemptionStatus.INVALID
         elif "launch" in flash_lower and "shift-enabled" in flash_lower:
             return RedemptionStatus.GAME_REQUIRED
+        elif "not available" in flash_lower and "platform" in flash_lower:
+            return RedemptionStatus.PLATFORM_UNAVAILABLE
+        elif "service unavailable" in flash_lower or "temporarily unavailable" in flash_lower:
+            return RedemptionStatus.ERROR
         else:
             return RedemptionStatus.UNKNOWN
 
@@ -2541,6 +2792,26 @@ def main():
         elif "--debug" in sys.argv:
             # Enable debug mode via command line
             config.debug = True
+        elif "--debug-html" in sys.argv:
+            # Special HTML debugging mode
+            log("DEBUG HTML MODE: Testing HTML parsing with enhanced debugging")
+            config.verbose = True
+            app = ShiftCodeManager()
+            
+            if not app.session.login(config.email, config.password):
+                log("ERROR: Authentication failed")
+                return
+            
+            # Test with one code
+            codes = db.get_unredeemed_codes(config.allowed_platforms)[:1]
+            if codes:
+                log(f"Testing HTML parsing with code: {codes[0][0]}")
+                results = app.redeemer.redeem_codes_batch(codes)
+                for result in results:
+                    log(f"Result: {result.status} - {result.message}")
+            else:
+                log("No codes available for testing")
+            return
             if not config.debug_dir.exists():
                 config.debug_dir.mkdir(parents=True, exist_ok=True)
             log_info("Debug mode enabled")
