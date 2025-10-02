@@ -19,6 +19,43 @@ The application scrapes SHiFT codes from these gaming websites:
 
 All codes are redeemed via the official SHiFT website: https://shift.gearboxsoftware.com
 
+## Discord Integration
+
+Configure a Discord webhook to receive rich notifications about code redemptions and issues.
+
+### Setup Discord Webhook
+
+1. Open Discord and navigate to your server
+2. Go to Server Settings > Integrations > Webhooks
+3. Click "New Webhook" or "Create Webhook"
+4. Give it a name (e.g., "BL4 AutoSHiFT")
+5. Select the channel for notifications
+6. Copy the Webhook URL
+7. Add to your `.env` file: `DISCORD_WEBHOOK_URL=<your_webhook_url>`
+
+### Notification Types
+
+**Successful Redemptions** (Green Embed)
+- Displays each redeemed code with details
+- Shows game titles, platforms (Steam/Epic/etc), and rewards
+- Example: "1 Golden Key", "5 Golden Keys", "Cosmetic Pack: Vault Hunter Bundle"
+
+![Discord Successful Redemption](docs/discord-redeem.png)
+
+**Authentication Failures** (Red Embed)
+- Alerts when login to SHiFT fails
+- Includes error details and required actions
+- Check your SHIFT_EMAIL and SHIFT_PASSWORD settings
+
+![Discord Authentication Failure](docs/discord-authentication.png)
+
+**Game Launch Required** (Orange Embed)
+- Notifies when SHiFT requires launching a game
+- Lists up to 5 affected codes
+- Automatically retries on next run after you launch a game
+
+![Discord Game Launch Required](docs/discord-gamelaunchrequired.png)
+
 ## Quick Start
 
 1. **Create docker-compose.yml:**
@@ -154,37 +191,6 @@ Gearbox sometimes requires launching a SHiFT-enabled game before allowing code r
 2. Discord notification is sent (if configured)
 3. Launch any Borderlands game and sign into SHiFT in-game
 4. The scraper automatically resumes on the next run
-
-## Discord Integration
-
-Configure a Discord webhook to receive notifications about code redemptions and issues.
-
-### Setup Discord Webhook
-
-1. Open Discord and navigate to your server
-2. Go to Server Settings > Integrations > Webhooks
-3. Click "New Webhook" or "Create Webhook"
-4. Give it a name (e.g., "BL4 AutoSHiFT")
-5. Select the channel for notifications
-6. Copy the Webhook URL
-7. Add to your `.env` file: `DISCORD_WEBHOOK_URL=<your_webhook_url>`
-
-### Notification Types
-
-**Successful Redemptions** (Green Embed)
-- Displays each redeemed code with details
-- Shows game titles, platforms (Steam/Epic/etc), and rewards
-- Example: "1 Golden Key", "5 Golden Keys", "Cosmetic Pack: Vault Hunter Bundle"
-
-**Authentication Failures** (Red Embed)
-- Alerts when login to SHiFT fails
-- Includes error details and required actions
-- Check your SHIFT_EMAIL and SHIFT_PASSWORD settings
-
-**Game Launch Required** (Orange Embed)
-- Notifies when SHiFT requires launching a game
-- Lists up to 5 affected codes
-- Automatically retries on next run after you launch a game
 
 ## Database
 
